@@ -6,6 +6,7 @@ import shutil
 import sys
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from ctypes import ArgumentError
 from pathlib import Path
 from types import FunctionType
 from xml.etree import ElementTree as ET
@@ -111,12 +112,14 @@ class AnnotatedLabel(Serializable):
         bbox: BBox | None = None,
         segments: list[float] | None = None,
         image_filename: str,
+        filepath: str | Path | None = None,
     ):
         self.class_id: int | None = class_id
         self.class_name: str = class_name
         self.bbox: BBox | None = bbox
         self.image_filename: str = image_filename
         self.segments: list[float] | None = segments
+        self.filepath: str | Path | None = filepath
 
     def __eq__(self, other):
         return hash(self) == hash(other)
@@ -152,12 +155,16 @@ class AnnotatedLabel(Serializable):
         )
 
     @staticmethod
-    def from_file(filepath):
+    def from_file(filepath: str | Path, image_filename="", class_name=""):
         filepath = Path(filepath).resolve()
         annotations = []
         with open(filepath) as f:
             for line in f:
-                annotations.append(AnnotatedLabel.parse_label(line))
+                label = AnnotatedLabel.parse_label(line)
+                label.filepath = filepath
+                label.image_filename = image_filename
+                label.class_name=class_name
+                annotations.append(label)
         return annotations
 
 
@@ -257,10 +264,10 @@ class YOLODataset(Serializable):
         dict[str, int]
             a dict where each key is a classname and values are the associated id
         """
-        unique_names = []
+        unique_names = set()
         for label in labels:
             if label.class_name not in unique_names:
-                unique_names.append(label.class_name)
+                unique_names.add(label.class_name)
 
         classes = {name: id for id, name in zip(range(len(unique_names)), unique_names)}
 
@@ -353,8 +360,6 @@ class YOLODataset(Serializable):
             "segments": [],
         }
 
-        self.labels = list(set(self.labels))
-        self.images = list(set(self.images))
         self.class_map = YOLODataset.get_mapped_classes(self.labels)
         self.class_distribution = {name: 0 for name in self.class_map.keys()}
 
@@ -684,29 +689,46 @@ class YOLODataset(Serializable):
         shuffle=True,
         recurse=True,
         save=True,
-        background_bias=None,
+        mode="all",
     ):
-        data = make_dataset(
-            images_dir, labels_dir, split=split, shuffle=shuffle, recurse=recurse
+        train_ds, val_ds = make_dataset(
+            images_dir,
+            labels_dir,
+            mode=mode,
+            split=split,
+            shuffle=shuffle,
+            recurse=recurse,
         )
-        for image in data[0]:
-            name = Path(image).name
+        for train_image in train_ds[0]:
+            name = str(train_image.filename)
             self.data_frame.loc[self.data_frame["filename"] == name, "type"] = "train"
+            class_name = self.data_frame.loc[self.data_frame["filename"] == name, "class_name"].iloc[0]
+            class_id = self.data_frame.loc[self.data_frame["filename"] == name, "class_id"].iloc[0]
+            for label in train_ds[1]:
+                if label.image_filename == name:
+                    label.class_name = class_name
+                    label.class_id = class_id
 
-        for image in data[2]:
-            name = Path(image).name
+        for val_image in val_ds[0]:
+            name = str(val_image.filename)
             self.data_frame.loc[self.data_frame["filename"] == name, "type"] = "val"
+            class_name = self.data_frame.loc[self.data_frame["filename"] == name, "class_name"].iloc[0]
+            class_id = self.data_frame.loc[self.data_frame["filename"] == name, "class_id"].iloc[0]
+            for label in val_ds[1]:
+                if label.image_filename == name:
+                    label.class_name = class_name
+                    label.class_id = class_id
 
         if save:
             copy_images_and_labels(
-                data[0],
-                data[1],
+                [image.filepath for image in train_ds[0]],
+                [label.filepath for label in train_ds[1]],
                 self.root_path / "images" / "train",
                 self.root_path / "labels" / "train",
             )
             copy_images_and_labels(
-                data[2],
-                data[3],
+                [image.filepath for image in val_ds[0]],
+                [label.filepath for label in val_ds[1]],
                 self.root_path / "images" / "val",
                 self.root_path / "labels" / "val",
             )
@@ -721,7 +743,11 @@ class YOLODataset(Serializable):
             )
         )
         self.data_frame.sort_values(by="type", inplace=True, ignore_index=True)
-        return data
+
+        self.images = train_ds[0] + val_ds[0]
+        self.labels = train_ds[1] + val_ds[1]
+
+        return train_ds, val_ds
 
 
 class XMLTree:
@@ -1078,6 +1104,7 @@ def extrapolate_annotations_from_label(label_path, path, class_map):
                 class_name=class_name,
                 bbox=bbox,
                 image_filename=image_data.filename,
+                filepath=label_path
             )
         )
     return labels, errors
@@ -1143,7 +1170,8 @@ def make_dataset(
     *,
     image_format=["jpg", "png"],
     label_format="txt",
-    split=0.7,
+    split=0.75,
+    mode="all",  # Addtional args: 'collection'
     shuffle=True,
     recurse=True,
 ):
@@ -1179,25 +1207,19 @@ def make_dataset(
         if not found:
             raise ValueError(f"Label for '{label_path.name}' not found")
 
-    split = int(len(all_paths) * split)
-    train_images = []
-    train_labels = []
-    for data in all_paths[:split]:
-        train_images.append(data["image"])
-        train_labels.append(data["label"])
+    match (mode):
+        case "all":
+            (train_images, train_labels), (val_images, val_labels) = split_dataset(
+                all_paths, split=split
+            )
+        case "collection":
+            (train_images, train_labels), (val_images, val_labels) = (
+                split_dataset_by_collection(all_paths, split=split)
+            )
+        case _:
+            raise ArgumentError(f'Invalid mode argument "{mode}"')
 
-    val_images = []
-    val_labels = []
-    for data in all_paths[split:]:
-        val_images.append(data["image"])
-        val_labels.append(data["label"])
-
-    for image, label in zip(train_images, train_labels):
-        if image in val_images or label in val_labels:
-            val_images.remove(image)
-            val_labels.remove(label)
-
-    return train_images, train_labels, val_images, val_labels
+    return (train_images, train_labels), (val_images, val_labels)
 
 
 def overlay_mask(image, mask, color, alpha, resize=None):
@@ -1277,12 +1299,47 @@ def yolo_create_dataset_from_dataframe(df, *, imgdir, parallel=True):
 
     return ds
 
-def split_data_by_image():
-    pass
 
-def split_data_by_collection():
-    pass
+def split_dataset_by_collection(image_label_paths, split=0.75):
+    collections = dict()
+    for data in image_label_paths:
+        name = data.get("image").parent.name
+        if name not in collections.keys():
+            collections[name] = []
+        collections[name].append(data)
 
-def split_data_k_fold(k):
+    train_ds = ([], [])
+    val_ds = ([], [])
+    for data in collections.values():
+        train, val = split_dataset(data, split)
+        train_ds[0].extend(train[0])
+        train_ds[1].extend(train[1])
+        val_ds[0].extend(val[0])
+        val_ds[1].extend(val[1])
+
+    return train_ds, val_ds
+
+
+def split_dataset(image_label_paths, split=0.75):
+    split = int(len(image_label_paths) * split)
+    train_images = []
+    train_labels = []
+    for data in image_label_paths[:split]:
+        image = ImageData(data["image"])
+        train_images.append(image)
+        train_labels.extend(AnnotatedLabel.from_file(data["label"], image.filename))
+
+    val_images = []
+    val_labels = []
+    for data in image_label_paths[split:]:
+        image = ImageData(data["image"])
+        val_images.append(image)
+        val_labels.extend(AnnotatedLabel.from_file(data["label"], image.filename))
+
+
+    return (train_images, train_labels), (val_images, val_labels)
+
+
+def split_dataset_by_k_fold(k):
     # return generator
     pass

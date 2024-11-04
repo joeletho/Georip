@@ -2,6 +2,7 @@ import io
 import os
 import sys
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from ctypes import ArgumentError
 from pathlib import Path
 from types import FunctionType
@@ -561,15 +562,20 @@ def preprocess_ndvi_difference_geotiffs(
         leave=leave,
     )
 
-    for path in imgs:
-        create_chips_from_geotiff(
-            path,
-            crs=gdf.crs,
-            chip_size=chip_size,
-            output_dir=output_dir / path.stem,
-            exist_ok=exist_ok,
-        )
-        pbar.update()
+    with ThreadPoolExecutor(max_workers=get_cpu_count()) as executor:
+        futures = [
+            executor.submit(
+                create_chips_from_geotiff,
+                path,
+                crs=gdf.crs,
+                chip_size=chip_size,
+                output_dir=output_dir / path.stem,
+                exist_ok=exist_ok,
+            )
+            for path in imgs
+        ]
+        for _ in as_completed(futures):
+            pbar.update()
 
     gdf = map_geometry_to_geotiffs(gdf, output_dir)
     pbar.update()
@@ -781,7 +787,8 @@ def ndvi_to_yolo_dataset(
     tif_to_png=True,
     use_segments=True,
     generate_train_data=True,
-    split=0.7,
+    split=0.75,
+    split_mode="all",
     shuffle=True,
     background_bias=None,
 ):
@@ -851,7 +858,8 @@ def ndvi_to_yolo_dataset(
         test_path=output_dir / "images" / "test",
     )
 
-    if generate_labels:
+    train_data = None
+    if generate_labels or generate_train_data:
         pbar.update()
         pbar.set_description("Creating YOLO dataset - Generating labels")
 
@@ -861,23 +869,27 @@ def ndvi_to_yolo_dataset(
             overwrite_existing=exist_ok,
             use_segments=use_segments,
         )
+        if generate_train_data:
+            pbar.update()
+            pbar.set_description(
+                "Creating YOLO dataset - Splitting dataset and copying files"
+            )
 
-    train_data = None
-    if generate_train_data:
-        pbar.update()
-        pbar.set_description(
-            "Creating YOLO dataset - Splitting dataset and copying files"
-        )
+            ds_images_dir = (
+                output_dir / "images" / "png-chips" if tif_to_png else chips_dir
+            )
+            train_data = yolo_ds.split_data(
+                ds_images_dir,
+                output_dir / "labels" / "generated",
+                split=split,
+                shuffle=shuffle,
+                recurse=True,
+                mode=split_mode,
+            )
 
-        ds_images_dir = output_dir / "images" / "png-chips" if tif_to_png else chips_dir
-        train_data = yolo_ds.split_data(
-            ds_images_dir,
-            output_dir / "labels" / "generated",
-            split=split,
-            shuffle=shuffle,
-            recurse=True,
-            background_bias=background_bias,
-        )
+            yolo_df = yolo_ds.data_frame
+            yolo_ds.compile(get_cpu_count())
+            yolo_ds.data_frame = yolo_df
 
     if save_csv:
         yolo_ds.to_csv(csv_dir / "yolo_ds.csv")
@@ -888,7 +900,7 @@ def ndvi_to_yolo_dataset(
     return yolo_ds, train_data
 
 
-def to_yolo(gdf: gpd.GeoDataFrame) -> YOLODataset:
+def to_yolo(gdf: gpd.GeoDataFrame, compile=True) -> YOLODataset:
     gdf = gdf.copy()
     gdf["geometry"] = gdf["geometry"].apply(
         lambda x: stringify_points(x.exterior.coords)
@@ -901,7 +913,7 @@ def to_yolo(gdf: gpd.GeoDataFrame) -> YOLODataset:
             segments_key="geometry",
             convert_bounds_to_bbox=True,
             num_workers=get_cpu_count(),
-            compile=True,
+            compile=compile,
         )
         if os.path.isfile(tmp_path):
             os.remove(tmp_path)
