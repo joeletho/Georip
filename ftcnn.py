@@ -22,7 +22,6 @@ from shapely.geometry import Polygon
 from skimage import img_as_float
 from tqdm.auto import tqdm, trange
 
-from .modeling.types import YOLODataset
 from .utils import (clear_directory, collect_files_with_suffix, get_cpu_count,
                     linterp, pathify)
 
@@ -764,166 +763,6 @@ def make_ndvi_dataset(
 
     return gdf, (meta_dir, chips_dir, output_fname)
 
-
-def ndvi_to_yolo_dataset(
-    shp_file,
-    ndvi_dir,
-    output_dir,
-    *,
-    years=None,
-    id_column="Subregion",
-    start_year_col="start_year",
-    end_year_col="end_year",
-    geom_col="geometry",
-    chip_size=None,
-    clean_dest=False,
-    xy_to_index=True,
-    class_parser=assign_default_classes,
-    exist_ok=False,
-    save_csv=False,
-    save_shp=False,
-    ignore_empty_geom=True,
-    generate_labels=True,
-    tif_to_png=True,
-    use_segments=True,
-    generate_train_data=True,
-    split=0.75,
-    split_mode="all",
-    shuffle=True,
-    background_bias=None,
-):
-    gdf, (meta_dir, chips_dir, output_fname) = make_ndvi_dataset(
-        shp_file,
-        ndvi_dir,
-        output_dir,
-        years=years,
-        id_column=id_column,
-        start_year_col=start_year_col,
-        end_year_col=end_year_col,
-        geom_col=geom_col,
-        chip_size=chip_size,
-        clean_dest=clean_dest,
-        xy_to_index=xy_to_index,
-        exist_ok=exist_ok,
-        save_csv=save_csv,
-        save_shp=save_shp,
-        ignore_empty_geom=ignore_empty_geom,
-        tif_to_png=tif_to_png,
-        leave=False,
-    )
-
-    csv_dir = meta_dir / "csv"
-    shp_dir = meta_dir / "shp"
-
-    n_calls = 2
-    n_calls += 1 if generate_labels else 0
-    n_calls += 1 if generate_train_data else 0
-    pbar = trange(n_calls, desc="Creating YOLO dataset - Encoding classes", leave=True)
-
-    gdf = one_hot_encode(gdf, class_parser)
-    if save_csv or save_shp:
-        output_fname = Path(f"{output_fname}_encoded")
-        if save_csv:
-            save_as_csv(gdf, csv_dir / output_fname.with_suffix(".csv"))
-        if save_shp:
-            save_as_shp(
-                gdf,
-                shp_dir / output_fname.with_suffix(".shp"),
-            )
-
-    labeled_images = gdf.loc[gdf["class_id"] != "-1"].values.tolist()
-
-    if background_bias is None:
-        gdf = gdf.loc[gdf["class_id"] == -1]
-        new_rows = labeled_images
-    else:
-        background_images = gdf.loc[gdf["class_id"] == "-1"].values.tolist()[
-            : len(labeled_images)
-        ]
-        new_rows = labeled_images + background_images
-
-    gdf = gpd.GeoDataFrame(new_rows, columns=gdf.columns, crs=gdf.crs)
-
-    pbar.update()
-    pbar.set_description("Creating YOLO dataset - Creating YOLODataset")
-
-    yolo_ds = to_yolo(gdf)
-
-    (output_dir / "config").mkdir(parents=True, exist_ok=True)
-    yolo_ds.generate_yaml_file(
-        root_abs_path=output_dir,
-        dest_abs_path=output_dir / "config",
-        train_path=output_dir / "images" / "train",
-        val_path=output_dir / "images" / "val",
-        test_path=output_dir / "images" / "test",
-    )
-
-    train_data = None
-    if generate_labels or generate_train_data:
-        pbar.update()
-        pbar.set_description("Creating YOLO dataset - Generating labels")
-
-        yolo_ds.generate_label_files(
-            output_dir / "labels" / "generated",
-            clear_dir=clean_dest,
-            overwrite_existing=exist_ok,
-            use_segments=use_segments,
-        )
-        if generate_train_data:
-            pbar.update()
-            pbar.set_description(
-                "Creating YOLO dataset - Splitting dataset and copying files"
-            )
-
-            ds_images_dir = (
-                output_dir / "images" / "png-chips" if tif_to_png else chips_dir
-            )
-            train_data = yolo_ds.split_data(
-                ds_images_dir,
-                output_dir / "labels" / "generated",
-                split=split,
-                shuffle=shuffle,
-                recurse=True,
-                mode=split_mode,
-            )
-
-            yolo_df = yolo_ds.data_frame
-            yolo_ds.compile(get_cpu_count())
-            yolo_ds.data_frame = yolo_df
-
-    if save_csv:
-        yolo_ds.to_csv(csv_dir / "yolo_ds.csv")
-
-    pbar.update()
-    pbar.set_description("Complete")
-    pbar.close()
-    return yolo_ds, train_data
-
-
-def to_yolo(gdf: gpd.GeoDataFrame, compile=True) -> YOLODataset:
-    gdf = gdf.copy()
-    gdf["geometry"] = gdf["geometry"].apply(
-        lambda x: stringify_points(x.exterior.coords)
-    )
-    tmp_path = "/tmp/ftcnn_yolo_ds.csv"
-    gdf.to_csv(tmp_path)
-    try:
-        ds = YOLODataset.from_csv(
-            tmp_path,
-            segments_key="geometry",
-            convert_bounds_to_bbox=True,
-            num_workers=get_cpu_count(),
-            compile=compile,
-        )
-        if os.path.isfile(tmp_path):
-            os.remove(tmp_path)
-    except Exception as e:
-        if os.path.isfile(tmp_path):
-            os.remove(tmp_path)
-        raise e
-    return ds
-
-
 """
     This might be the issue which causes the label issues where geometry 
     does not align with the actual geom,also causing the labeled geom to 
@@ -1192,3 +1031,22 @@ def process_geotiff_to_png_conversion(
     pbar.close()
 
     return file_map
+
+def chip_geotiff_and_convert_to_png(geotiff_path, *, chip_size):
+    epsg_code = None
+    with rasterio.open(geotiff_path) as src:
+        if src.crs.is_epsg_code:
+            # Returns a number indicating the EPSG code
+            epsg_code = src.crs.to_epsg()
+
+    if not epsg_code:
+        raise AttributeError("GeoTIFF missing EPSG identifier ")
+
+    images = []
+    chips = create_chips_from_geotiff(geotiff_path, chip_size=chip_size, crs=src.crs)
+
+    for tiff, coords in chips:
+        image = tiff_to_png(tiff)
+        if image.max() != float("nan"):
+            images.append((image, coords))
+    return images, epsg_code
