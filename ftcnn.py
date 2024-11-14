@@ -5,6 +5,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ctypes import ArgumentError
 from pathlib import Path
+from time import time
 from types import FunctionType
 
 import geopandas as gpd
@@ -25,8 +26,16 @@ from tqdm.auto import tqdm, trange
 from .utils import (clear_directory, collect_files_with_suffix, get_cpu_count,
                     linterp, pathify)
 
+TQDM_INTERVAL = 1 / 100
+
 warnings.filterwarnings("ignore", "GeoSeries.notna", UserWarning)
 gdal.UseExceptions()
+
+
+def open_geo_ds(path):
+    if not isinstance(path, str):
+        path = str(path)
+    return gdal.Open(path)
 
 
 def save_as_shp(gdf: gpd.GeoDataFrame, path, exist_ok=False):
@@ -63,12 +72,12 @@ def open_tif(path, *, masked=True):
     return rxr.open_rasterio(path, masked=masked).squeeze()
 
 
-def assign_default_classes(row):
+def encode_default_classes(row):
     geom = row.get("geometry")
     return (
-        ("0", "Treatment")
+        (0, "Treatment")
         if geom is not None and not geom.is_empty and geom.area > 1
-        else ("-1", "Background")
+        else (-1, "Background")
     )
 
 
@@ -105,28 +114,35 @@ def flatten_geom(gdf_src, id_column, geometry_column="geometry", leave=True):
     geometry = []
     rows = []
 
-    pbar = trange(
-        len(gdf_src.groupby(id_column)) + 1, desc="Flattening geometry", leave=leave
-    )
+    total_updates = len(gdf_src.groupby(id_column)) + 1
+    updates = 0
+    pbar = trange(total_updates, desc="Flattening geometry", leave=leave)
+    start = time()
     for _, group in gdf_src.groupby(id_column):
         polygon = shapely.unary_union(group.geometry)
         if isinstance(polygon, shapely.MultiPolygon):
-            for poly in polygon.geoms:
+            for i, poly in enumerate(polygon.geoms):
                 poly = normalize(poly)
-                row = group.iloc[0].drop(geometry_column).to_dict()
-                row["bbox"] = get_geom_bboxes(poly)[0]
-                rows.append(row)
-                geometry.append(poly)
+                row = group.iloc[i].drop(geometry_column).to_dict()
+                for bbox in get_geom_bboxes(polygon):
+                    row["bbox"] = bbox
+                    rows.append(row)
+                    geometry.append(polygon)
         else:
             polygon = normalize(polygon)
             row = group.iloc[0].drop(geometry_column).to_dict()
-            row["bbox"] = get_geom_bboxes(polygon)[0]
-            rows.append(row)
-            geometry.append(polygon)
-        pbar.update()
+            for bbox in get_geom_bboxes(polygon):
+                row["bbox"] = bbox
+                rows.append(row)
+                geometry.append(polygon)
+        if time() - start >= TQDM_INTERVAL:
+            pbar.update()
+            updates += 1
+            start = time()
 
     gdf = gpd.GeoDataFrame(rows, geometry=geometry, crs=gdf_src.crs)
-    pbar.update()
+    if updates < total_updates:
+        pbar.update(total_updates - updates)
     pbar.set_description("Flattening geometry. Complete")
     pbar.close()
 
@@ -134,7 +150,12 @@ def flatten_geom(gdf_src, id_column, geometry_column="geometry", leave=True):
 
 
 def map_metadata(
-    df_src, img_dir, parse_filename=parse_filename, leave=True
+    df_src,
+    start_year_col,
+    end_year_col,
+    img_dir,
+    parse_filename=parse_filename,
+    leave=True,
 ) -> pd.DataFrame:
     img_dir = Path(img_dir).resolve()
     columns = {
@@ -149,7 +170,10 @@ def map_metadata(
     rows = []
     geometry = []
 
-    pbar = trange(len(df_src) + 1, desc="Collecting image data", leave=leave)
+    total_updates = len(df_src) + 1
+    updates = 0
+    start = time()
+    pbar = trange(total_updates, desc="Collecting image data", leave=leave)
     for _, row in df_src.iterrows():
         filename = parse_filename(row)
         path = img_dir / filename
@@ -166,8 +190,8 @@ def map_metadata(
                 height = str(img.shape[1])
                 rows.append(
                     {
-                        "start_year": row["StartYear"],
-                        "end_year": row["EndYear"],
+                        "start_year": row[start_year_col],
+                        "end_year": row[end_year_col],
                         "filename": filename,
                         "path": path,
                         "width": width,
@@ -176,24 +200,40 @@ def map_metadata(
                     }
                 )
                 geometry.append(row["geometry"])
-        pbar.update()
+        if time() - start >= TQDM_INTERVAL:
+            pbar.update()
+            updates += 1
+            start = time()
 
     pbar.set_description("Populating dataframe")
 
     df_dest = gpd.GeoDataFrame(rows, columns=columns, geometry=geometry, crs=df_src.crs)
-    pbar.update()
 
+    if updates < total_updates:
+        pbar.update(total_updates - updates)
     pbar.set_description("Collecting image data. Complete")
     pbar.close()
 
     return df_dest
 
 
-def preprocess_shapefile(shpfile, id_column, img_dir, leave=True) -> gpd.GeoDataFrame:
+def preprocess_shapefile(
+    shpfile, years, id_column, start_year_col, end_year_col, img_dir, leave=True
+) -> gpd.GeoDataFrame:
     gdf = load_shapefile(shpfile)
     crs = gdf.crs
+
+    if years is not None:
+        gdf = gdf[(gdf[start_year_col] == years[0]) & (gdf[end_year_col] == years[1])]
+
     gdf = flatten_geom(gdf, id_column=id_column, leave=leave)
-    gdf = map_metadata(gdf, img_dir, leave=leave)
+    gdf = map_metadata(
+        gdf,
+        start_year_col=start_year_col,
+        end_year_col=end_year_col,
+        img_dir=img_dir,
+        leave=leave,
+    )
     return gpd.GeoDataFrame(gdf, crs=crs)
 
 
@@ -302,7 +342,7 @@ def normalize_shapefile(path):
     df_out = gpd.GeoDataFrame(columns=columns)
     df_out.drop("geometry", axis=1)
 
-    pbar = trange(len(df_in), desc="Normalizing")
+    pbar = trange(len(df_in), desc="Normalizing", leave=False)
     for _, row in df_in.iterrows():
         row_out = dict(row)
         geom = row_out["geometry"]
@@ -329,8 +369,10 @@ def normalize_shapefile_with_metadata(shpfile, dir, filename_key=parse_filename)
         "width": [],
         "height": [],
     }
-
-    pbar = trange(len(df_out) + 1, desc="Collecting image data")
+    total_updates = len(df_out) + 1
+    updates = 0
+    start = time()
+    pbar = trange(total_updates, desc="Collecting image data")
     for _, row in df_out.iterrows():
         filename = filename_key(row)
         path = dir / filename
@@ -351,38 +393,42 @@ def normalize_shapefile_with_metadata(shpfile, dir, filename_key=parse_filename)
         columns["path"].append(path)
         columns["width"].append(width)
         columns["height"].append(height)
-        pbar.update()
+        if time() - start >= TQDM_INTERVAL:
+            pbar.update()
+            updates += 1
+            start = time()
 
     pbar.set_description("Populating dataframe")
     df_out = df_out.assign(**columns)
-    pbar.update()
+
+    if updates < total_updates:
+        pbar.update(total_updates - updates)
     pbar.set_description("Complete")
     pbar.close()
 
     return df_out
 
 
-def default_one_hot_key(df_row):
-    try:
-        treatment = int(df_row["RetentionP"])
-    except Exception:
-        treatment = 2
-    return ("1", "Treatment") if treatment == 1 else ("0", "NoTreatment")
-
-
-def one_hot_encode(df: pd.DataFrame, key=default_one_hot_key):
+def encode_classes(df: pd.DataFrame, encoder=encode_default_classes):
     columns = {"class_id": [], "class_name": []}
+    total_updates = len(df) + 1
+    updates = 0
+    start = time()
     pbar = trange(len(df) + 1, desc="Encoding class data")
-
     for _, row in df.iterrows():
-        id, name = key(row)
+        id, name = encoder(row)
         columns["class_id"].append(id)
         columns["class_name"].append(name)
-        pbar.update()
+        if time() - start >= TQDM_INTERVAL:
+            pbar.update()
+            updates += 1
+            start = time()
     df_encoded = df.copy()
     df_encoded.insert(0, "class_id", columns["class_id"])
     df_encoded.insert(1, "class_name", columns["class_name"])
-    pbar.update()
+
+    if updates < total_updates:
+        pbar.update(total_updates - updates)
     pbar.set_description("Complete")
     pbar.close()
     return df_encoded
@@ -391,8 +437,8 @@ def one_hot_encode(df: pd.DataFrame, key=default_one_hot_key):
 def write_chip(data, *, transform, meta, output_path=None):
     meta.update(
         {
-            "width": data.shape[0],
-            "height": data.shape[1],
+            "height": data.shape[0],
+            "width": data.shape[1],
             "transform": transform,
         }
     )
@@ -432,8 +478,11 @@ def create_chips_from_geotiff(
         if width <= 0 or height <= 0:
             return []
 
+        total_updates = rmax // height
+        updates = 0
+        start = time()
         pbar = trange(
-            rmin, rmax, height, desc=f"Processing {geotiff_path.name}", leave=leave
+            total_updates, desc=f"Processing {geotiff_path.name}", leave=leave
         )
         for row in range(rmin, rmax, height):
             for col in range(cmin, cmax, width):
@@ -441,7 +490,7 @@ def create_chips_from_geotiff(
                 if output_dir is not None:
                     output_dir = Path(output_dir)
                     chip_output_path = (
-                        output_dir / f"{geotiff_path.stem}_chip_{col}_{row}.tif"
+                        output_dir / f"{geotiff_path.stem}_chip_{row}_{col}.tif"
                     )
                     if chip_output_path.exists() and not exist_ok:
                         raise FileExistsError(
@@ -449,8 +498,13 @@ def create_chips_from_geotiff(
                         )
                     output_dir.mkdir(parents=True, exist_ok=True)
 
+                chip_height = row + height - 1
+                rem_height = rmax - row - 1
+                chip_width = col + width - 1
+                rem_width = cmax - col - 1
                 chip_window = Window.from_slices(
-                    rows=(row, row + height), cols=(col, col + width)
+                    rows=(row, min(chip_height, rem_height)),
+                    cols=(col, min(chip_width, rem_width)),
                 )
                 chip_data = src.read(1, window=chip_window)
 
@@ -470,8 +524,15 @@ def create_chips_from_geotiff(
                     meta=src.meta.copy(),
                     output_path=chip_output_path,
                 )
-                chips.append((chip, src.xy(row, col)))
-            pbar.update()
+                chips.append((chip, src.xy(row, col, offset="ul")))
+            if time() - start >= TQDM_INTERVAL:
+                pbar.update()
+                updates += 1
+                start = time()
+    if leave:
+        pbar.set_description(f"{geotiff_path.name} processed.")
+    if updates < total_updates:
+        pbar.update(total_updates - updates)
     pbar.close()
 
     return chips
@@ -511,6 +572,8 @@ def preprocess_geotiff_dataset(
         get_filepaths = match_years
 
     imgs = pathify(get_filepaths(gdf))
+    if not isinstance(imgs, list):
+        imgs = [imgs]
 
     if len(imgs) == 0:
         raise Exception("Could not find images")
@@ -518,10 +581,7 @@ def preprocess_geotiff_dataset(
     output_dir = output_dir if isinstance(output_dir, Path) else Path(output_dir)
 
     if clean_dest:
-        pbar = trange(1, desc="Cleaning output directory", leave=False)
         clear_directory(output_dir)
-        pbar.update()
-        pbar.close()
 
     return imgs
 
@@ -629,7 +689,7 @@ def make_ndvi_dataset(
     save_shp=False,
     ignore_empty_geom=True,
     tif_to_png=True,
-    leave=True,
+    pbar_leave=True,
 ):
     if shp_file is None:
         raise ArgumentError("Missing path to shape file")
@@ -661,18 +721,24 @@ def make_ndvi_dataset(
     n_calls += 1 if tif_to_png else 0
 
     pbar = trange(
-        n_calls, desc="Creating NDVI dataset - Preprocessing shapefile", leave=leave
+        n_calls,
+        desc="Creating NDVI dataset - Preprocessing shapefile",
+        leave=pbar_leave,
     )
 
     gdf = preprocess_shapefile(
-        shp_file, id_column=id_column, img_dir=ndvi_dir, leave=False
+        shp_file,
+        years=years,
+        id_column=id_column,
+        start_year_col=start_year_col,
+        end_year_col=end_year_col,
+        img_dir=ndvi_dir,
+        leave=False,
     )
     pbar.update()
 
-    if years is not None:
-        gdf = gdf.loc[
-            (gdf[start_year_col] == years[0]) & (gdf[end_year_col] == years[1])
-        ]
+    start_year_col = "start_year"
+    end_year_col = "end_year"
 
     output_fname = shp_file.stem
     if years is not None:
@@ -762,6 +828,7 @@ def make_ndvi_dataset(
     pbar.close()
 
     return gdf, (meta_dir, chips_dir, output_fname)
+
 
 """
     This might be the issue which causes the label issues where geometry 
@@ -973,7 +1040,7 @@ def tiff_to_png(tiff, out_path=None):
 
 
 def normalize_tiff(src_path, dest, *, vmin=None, vmax=None):
-    src_ds = gdal.Open(src_path)
+    src_ds = open_geo_ds(src_path)
 
     translate_opts = ["-ot", "Byte", "-co", "TILED=YES", "-a_nodata", "0", "-scale"]
 
@@ -1003,7 +1070,7 @@ def process_geotiff_to_png_conversion(
     maxval = -sys.maxsize
 
     for path in src_paths:
-        ds = gdal.Open(path)
+        ds = open_geo_ds(path)
         for i in range(1, ds.RasterCount):
             rb = ds.GetRasterBand(i)
             rb.SetNoDataValue(0)
@@ -1031,6 +1098,7 @@ def process_geotiff_to_png_conversion(
     pbar.close()
 
     return file_map
+
 
 def chip_geotiff_and_convert_to_png(geotiff_path, *, chip_size):
     epsg_code = None

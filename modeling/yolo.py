@@ -1,28 +1,228 @@
 import os
+import random
 import shutil
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from time import sleep
+from time import sleep, time
 
 import cv2
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import rasterio
+import torch
 from matplotlib import pyplot as plt
+from pandas.compat import sys
+from PIL import Image, ImageDraw
 from shapely import MultiPolygon, Polygon, normalize, unary_union
+from torchvision import tv_tensors
+from torchvision.io import read_image
+from torchvision.transforms.v2 import functional as F
 from tqdm.auto import tqdm, trange
 
-from ftcnn.ftcnn import (assign_default_classes,
-                         chip_geotiff_and_convert_to_png, clear_directory,
-                         get_cpu_count, make_ndvi_dataset, one_hot_encode,
+from ftcnn.ftcnn import (chip_geotiff_and_convert_to_png, clear_directory,
+                         encode_classes, get_cpu_count, make_ndvi_dataset,
                          save_as_csv, save_as_shp, stringify_points)
 
 from .types import BBox, XYInt, YOLODataset
-from .utils import extract_annotated_label_and_image_data, write_classes
+from .utils import (display_image_and_annotations,
+                    extract_annotated_label_and_image_data, write_classes)
 
 warnings.filterwarnings("ignore", "GeoSeries.notna", UserWarning)
+
+TQDM_INTERVAL = 1 / 100
+
+
+class YOLODatasetViewer(torch.utils.data.Dataset):
+    def __init__(self, imgs_dir, anns_dir, transforms=None):
+        """
+        Args:
+            imgs_dir (str): Directory where the images are stored.
+            anns_dir (str): Directory where the YOLO annotation files are stored.
+            transforms (callable, optional): Optional transform to be applied on a sample.
+        """
+        self.imgs_dir = imgs_dir
+        self.anns_dir = anns_dir
+        self.transforms = transforms
+        self.classes = ["treatment"]
+
+        # Get all image files
+        self.img_files = [
+            file_name
+            for file_name in os.listdir(imgs_dir)
+            if file_name.lower().endswith((".png", ".jpg", ".jpeg"))
+        ]
+        self.img_files.sort()
+
+    def __getitem__(self, idx):
+        # Get image file name and corresponding annotation file
+        img_file = self.img_files[idx]
+        img_path = os.path.join(self.imgs_dir, img_file)
+        ann_path = os.path.join(self.anns_dir, os.path.splitext(img_file)[0] + ".txt")
+
+        # Load the image
+        img = read_image(img_path)
+        img = tv_tensors.Image(img)
+
+        # Get image dimensions
+        img_height, img_width = F.get_size(img)  # returns (H, W)
+
+        # Initialize lists for boxes, labels, masks
+        boxes = []
+        labels = []
+        masks = []
+
+        # Check if annotation file exists
+        if os.path.exists(ann_path):
+            with open(ann_path, "r") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) < 5:
+                        continue  # Skip invalid lines
+
+                    class_id = int(parts[0])
+
+                    if len(parts) == 5:
+                        # Standard YOLO format: class_id x_center y_center width height
+                        x_center = float(parts[1])
+                        y_center = float(parts[2])
+                        width = float(parts[3])
+                        height = float(parts[4])
+
+                        # Convert from normalized coordinates to pixel coordinates
+                        x_center *= img_width
+                        y_center *= img_height
+                        width *= img_width
+                        height *= img_height
+
+                        # Convert from center coordinates to corner coordinates
+                        x_min = x_center - width / 2
+                        y_min = y_center - height / 2
+                        x_max = x_center + width / 2
+                        y_max = y_center + height / 2
+
+                        boxes.append([x_min, y_min, x_max, y_max])
+                        labels.append(class_id)
+
+                        # Create a mask from the bounding box
+                        mask = torch.zeros((img_height, img_width), dtype=torch.uint8)
+                        x_min_int = int(round(x_min))
+                        y_min_int = int(round(y_min))
+                        x_max_int = int(round(x_max))
+                        y_max_int = int(round(y_max))
+                        mask[y_min_int:y_max_int, x_min_int:x_max_int] = 1
+                        masks.append(mask.numpy())
+                    else:
+                        # Assume the rest of the parts are polygon coordinates
+                        # Format: class_id x1 y1 x2 y2 x3 y3 ... xn yn
+                        coords = list(map(float, parts[1:]))
+                        if len(coords) % 2 != 0:
+                            continue  # Invalid polygon
+
+                        x_coords = coords[::2]
+                        y_coords = coords[1::2]
+
+                        # Convert normalized coordinates to pixel coordinates
+                        x_coords = [x * img_width for x in x_coords]
+                        y_coords = [y * img_height for y in y_coords]
+
+                        # Create a polygon
+                        polygon = [(x, y) for x, y in zip(x_coords, y_coords)]
+
+                        # Create a mask from the polygon
+                        mask_img = Image.new("L", (img_width, img_height), 0)
+                        ImageDraw.Draw(mask_img).polygon(polygon, outline=1, fill=1)
+                        mask = np.array(mask_img, dtype=np.uint8)
+                        masks.append(mask)
+
+                        # Compute bounding box
+                        x_min = min(x_coords)
+                        x_max = max(x_coords)
+                        y_min = min(y_coords)
+                        y_max = max(y_coords)
+                        boxes.append([x_min, y_min, x_max, y_max])
+                        labels.append(class_id)
+
+        else:
+            # If annotation file doesn't exist, return empty annotations
+            boxes = []
+            labels = []
+            masks = []
+
+        # Convert to tensors
+        if len(boxes) > 0:
+            boxes = tv_tensors.BoundingBoxes(
+                boxes, format="XYXY", canvas_size=F.get_size(img)
+            )
+            labels = torch.as_tensor(labels, dtype=torch.int64)
+            masks = tv_tensors.Mask(masks)
+            # Compute area
+            area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+            area = torch.as_tensor(area, dtype=torch.float32)
+            iscrowd = torch.zeros((len(labels),), dtype=torch.int64)
+        else:
+            boxes = tv_tensors.BoundingBoxes(
+                [], format="XYXY", canvas_size=F.get_size(img)
+            )
+            labels = torch.as_tensor([], dtype=torch.int64)
+            masks = tv_tensors.Mask([])
+            area = torch.as_tensor([], dtype=torch.float32)
+            iscrowd = torch.as_tensor([], dtype=torch.int64)
+
+        image_id = idx
+
+        # Prepare the target dictionary
+        target = {
+            "boxes": boxes,
+            "labels": labels,
+            "masks": masks,
+            "image_id": image_id,
+            "area": area,
+            "iscrowd": iscrowd,
+        }
+
+        # Apply transforms
+        if self.transforms is not None:
+            img, target = self.transforms(img, target)
+
+        return img, target
+
+    def __len__(self):
+        return len(self.img_files)
+
+    def draw(
+        self,
+        show=True,
+        save_dir=None,
+        include_background=False,
+        verbose=False,
+        pbar=False,
+        leave=False,
+        pbar_desc="Drawing annotations",
+    ):
+        if pbar:
+            total_updates = len(self)
+            updates = 0
+            start = time()
+            pbar = trange(total_updates, desc=pbar_desc, leave=leave)
+        for i in range(len(self)):
+            display_image_and_annotations(
+                self,
+                idx=i,
+                save_dir=save_dir,
+                show=show,
+                include_background=include_background,
+                verbose=verbose,
+            )
+            if pbar and time() - start >= TQDM_INTERVAL:
+                pbar.update()
+                updates += 1
+                start = time()
+        if pbar:
+            if updates < total_updates:
+                pbar.update(total_updates - updates)
+            pbar.close()
 
 
 def plot_yolo_results(
@@ -342,7 +542,12 @@ def convert_xml_dataframe_to_yolo(df: pd.DataFrame):
 
 
 def predict_on_image_stream(model, *, images, conf=0.6, **kwargs):
-    batch_size = get_cpu_count()
+    batch_size = kwargs.get("batch_size")
+    if batch_size is None:
+        num_workers = kwargs.get("num_workers")
+        batch_size = num_workers if num_workers is not None else get_cpu_count()
+    else:
+        kwargs.pop("batch_size")
     for i in range(0, len(images) - 1, batch_size):
         try:
             results = model.predict(
@@ -354,7 +559,8 @@ def predict_on_image_stream(model, *, images, conf=0.6, **kwargs):
             )
             for j, result in enumerate(results):
                 yield get_result_stats(result), images[i + j][1]
-        except Exception as _:
+        except Exception as e:
+            print(e, file=sys.stderr)
             yield None
 
 
@@ -406,6 +612,7 @@ def predict_geotiff(model, geotiff_path, confidence, chip_size, imgsz, **kwargs)
             results.append(result)
             pbar.set_description(f"Detections {len(results)}")
         pbar.update()
+    pbar.update()
     pbar.close()
 
     columns = [
@@ -512,7 +719,7 @@ def predict_geotiff(model, geotiff_path, confidence, chip_size, imgsz, **kwargs)
 
 
 def predict_geotiffs(
-    model, geotiff_paths, *, confidence, chip_size, imgsz, num_workers=2, **kwargs
+    model, geotiff_paths, *, confidence, chip_size, imgsz, max_images=2, **kwargs
 ):
     results = []
     gdfs = []
@@ -525,7 +732,7 @@ def predict_geotiffs(
 
     pbar = trange(len(geotiff_paths), desc="Processing predictions", leave=False)
 
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+    with ThreadPoolExecutor(max_workers=max_images) as executor:
         futures = [
             executor.submit(
                 predict_geotiff,
@@ -539,16 +746,19 @@ def predict_geotiffs(
             for path in geotiff_paths
         ]
         for future in as_completed(futures):
-            result, _gdf = future.result()
-            results.append(result)
-            if len(gdfs) == 0:
-                gdfs.append(_gdf)
-            elif not _gdf.empty:
-                index = get_index_with_crs(_gdf)
-                if index == -1:
+            if future.exception() is not None:
+                print(future.exception(), file=sys.stderr)
+            else:
+                result, _gdf = future.result()
+                results.append(result)
+                if len(gdfs) == 0:
                     gdfs.append(_gdf)
-                else:
-                    gdfs[index] = pd.concat([gdfs[index], _gdf], ignore_index=True)
+                elif not _gdf.empty:
+                    index = get_index_with_crs(_gdf)
+                    if index == -1:
+                        gdfs.append(_gdf)
+                    else:
+                        gdfs[index] = pd.concat([gdfs[index], _gdf], ignore_index=True)
             pbar.update()
     pbar.close()
 
@@ -568,7 +778,7 @@ def ndvi_to_yolo_dataset(
     chip_size=None,
     clean_dest=False,
     xy_to_index=True,
-    class_parser=assign_default_classes,
+    encoder=encode_classes,
     exist_ok=False,
     save_csv=False,
     save_shp=False,
@@ -579,8 +789,11 @@ def ndvi_to_yolo_dataset(
     generate_train_data=True,
     split=0.75,
     split_mode="all",
-    shuffle=True,
+    shuffle_split=True,
+    shuffle_background=True,
     background_bias=None,
+    min_labels_required=10,
+    pbar_leave=True,
 ):
     gdf, (meta_dir, chips_dir, output_fname) = make_ndvi_dataset(
         shp_file,
@@ -597,20 +810,20 @@ def ndvi_to_yolo_dataset(
         exist_ok=exist_ok,
         save_csv=save_csv,
         save_shp=save_shp,
-        ignore_empty_geom=ignore_empty_geom,
+        ignore_empty_geom=ignore_empty_geom and background_bias is None,
         tif_to_png=tif_to_png,
-        leave=False,
+        pbar_leave=False,
     )
 
     csv_dir = meta_dir / "csv"
     shp_dir = meta_dir / "shp"
 
-    n_calls = 2
+    n_calls = 3
     n_calls += 1 if generate_labels else 0
     n_calls += 1 if generate_train_data else 0
-    pbar = trange(n_calls, desc="Creating YOLO dataset - Encoding classes", leave=True)
+    pbar = trange(n_calls, desc="Creating YOLO dataset - Encoding classes", leave=pbar_leave)
 
-    gdf = one_hot_encode(gdf, class_parser)
+    gdf = encode_classes(gdf, encoder)
     if save_csv or save_shp:
         output_fname = Path(f"{output_fname}_encoded")
         if save_csv:
@@ -621,31 +834,43 @@ def ndvi_to_yolo_dataset(
                 shp_dir / output_fname.with_suffix(".shp"),
             )
 
-    labeled_images = gdf.loc[gdf["class_id"] != "-1"].values.tolist()
+    labeled_images = gdf.loc[gdf["class_id"] != -1].values.tolist()
 
     if background_bias is None:
-        gdf = gdf.loc[gdf["class_id"] == -1]
         new_rows = labeled_images
     else:
-        background_images = gdf.loc[gdf["class_id"] == "-1"].values.tolist()[
-            : len(labeled_images)
+        background_images = gdf.loc[gdf["class_id"] == -1].values.tolist()
+        if shuffle_background:
+            random.shuffle(background_images)
+        background_images = background_images[
+            : int(len(labeled_images) * background_bias)
         ]
+
         new_rows = labeled_images + background_images
 
     gdf = gpd.GeoDataFrame(new_rows, columns=gdf.columns, crs=gdf.crs)
-
     pbar.update()
-    pbar.set_description("Creating YOLO dataset - Creating YOLODataset")
 
+    if len(gdf) < min_labels_required:
+        pbar.set_description("Failed to create YOLO dataset - Error occured")
+        pbar.close()
+        raise ValueError(
+            f"Minimum number of labels is less than the minimum required: got {len(gdf)} when at least {min_labels_required} are required."
+        )
+
+    pbar.set_description(
+        f"Creating YOLO dataset - Creating YOLODataset with {len(gdf)} labels"
+    )
     yolo_ds = to_yolo(gdf)
+    pbar.set_description("Creating YOLO dataset - Dataset created")
+    pbar.update()
 
     (output_dir / "config").mkdir(parents=True, exist_ok=True)
     yolo_ds.generate_yaml_file(
         root_abs_path=output_dir,
         dest_abs_path=output_dir / "config",
-        train_path=output_dir / "images" / "train",
-        val_path=output_dir / "images" / "val",
-        test_path=output_dir / "images" / "test",
+        train_path="images/train",
+        val_path="images/val",
     )
 
     train_data = None
@@ -654,7 +879,7 @@ def ndvi_to_yolo_dataset(
         pbar.set_description("Creating YOLO dataset - Generating labels")
 
         yolo_ds.generate_label_files(
-            output_dir / "labels" / "generated",
+            dest_path=output_dir / "labels" / "generated",
             clear_dir=clean_dest,
             overwrite_existing=exist_ok,
             use_segments=use_segments,
@@ -669,10 +894,10 @@ def ndvi_to_yolo_dataset(
                 output_dir / "images" / "png-chips" if tif_to_png else chips_dir
             )
             train_data = yolo_ds.split_data(
-                ds_images_dir,
-                output_dir / "labels" / "generated",
+                images_dir=ds_images_dir,
+                labels_dir=output_dir / "labels" / "generated",
                 split=split,
-                shuffle=shuffle,
+                shuffle=shuffle_split,
                 recurse=True,
                 mode=split_mode,
             )
@@ -687,6 +912,7 @@ def ndvi_to_yolo_dataset(
     pbar.update()
     pbar.set_description("Complete")
     pbar.close()
+
     return yolo_ds, train_data
 
 
