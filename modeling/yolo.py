@@ -840,9 +840,7 @@ def ndvi_to_yolo_dataset(
                 shp_dir / output_fname.with_suffix(".shp"),
             )
 
-    print("Number of rows before prune:", len(gdf))
     labeled_images = gdf.loc[gdf["class_id"] != -1].values.tolist()
-    print("Number of labeled images:", len(labeled_images))
 
     if ignore_empty_geom or background_bias is None:
         new_rows = labeled_images
@@ -854,10 +852,8 @@ def ndvi_to_yolo_dataset(
             : int(len(labeled_images) * background_bias)
         ]
 
-        print("Number of background images:", len(background_images))
         new_rows = labeled_images + background_images
 
-    print("Number of rows after prune:", len(new_rows))
     gdf = gpd.GeoDataFrame(new_rows, columns=gdf.columns, crs=gdf.crs)
     pbar.update()
 
