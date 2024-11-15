@@ -10,6 +10,7 @@ from ctypes import ArgumentError
 from pathlib import Path
 from time import sleep, time
 from types import FunctionType
+from typing import Annotated
 from xml.etree import ElementTree as ET
 
 import cv2
@@ -50,13 +51,7 @@ class BBox(Serializable):
         self.height: float = h
 
     def __eq__(self, other):
-        return (
-            self.x == other.x
-            and self.y == other.y
-            and self.width == other.width
-            and self.height == other.height
-        )
-
+        return isinstance(other, BBox) and hash(self) == hash(other)
     def __hash__(self):
         return hash((self.x, self.y, self.width, self.height))
 
@@ -81,31 +76,14 @@ class ImageData(Serializable):
         self.filepath: str = str(filepath)
 
     def __eq__(self, other):
-        return hash(self) == hash(other)
+        return isinstance(other, ImageData) and hash(self) == hash(other)
 
     def __hash__(self):
-        return hash((self.filepath))
-
-    def getPixelAtCoords(self, x, y, **kwargs):
-        if self.extension != ".tif":
-            raise TypeError(
-                f"Image type '{self.extension}' does not contain georeference data"
-            )
-        image = rasterio.open(self.filepath)
-        data = image.index(x, y, **kwargs)
-        image.close()
-        return data
-
-    def getCoordsAtPixel(self, x, y, **kwargs):
-        if self.extension != ".tif":
-            raise TypeError(
-                f"Image type '{self.extension}' does not contain georeference data"
-            )
-        image = rasterio.open(self.filepath)
-        data = image.xy(x, y, **kwargs)
-        image.close()
-        return data
-
+        return hash((
+            self.shape[0],
+            self.shape[1],
+            self.filepath,
+        ))
 
 class AnnotatedLabel(Serializable):
     def __init__(
@@ -128,16 +106,18 @@ class AnnotatedLabel(Serializable):
         self.filepath: str | Path | None = str(filepath)
 
     def __eq__(self, other):
-        return hash(self) == hash(other)
+        return isinstance(other, AnnotatedLabel) and hash(self) == hash(other)
 
     def __hash__(self):
         return hash(
             (
+                self.type,
                 self.class_id,
                 self.class_name,
                 self.bbox,
                 str(self.segments),
                 self.image_filename,
+                self.filepath
             )
         )
 
@@ -396,6 +376,9 @@ class YOLODataset(Serializable):
         if not (len(self.labels) and len(self.images)):
             raise ValueError("Dataset does not contain valid data.")
 
+        self.labels = list(set(self.labels))
+        self.images = list(set(self.images))
+
         self.class_map = YOLODataset.get_mapped_classes(self.labels)
         self.class_distribution = {name: 0 for name in self.class_map.keys()}
 
@@ -510,6 +493,7 @@ class YOLODataset(Serializable):
                         raise RuntimeError(msg)
 
         self.data_frame = pd.DataFrame.from_dict(data)
+        self.data_frame = self.data_frame.drop_duplicates()
 
         if len(indices_to_remove) > 0:
             self.__request_lock__()

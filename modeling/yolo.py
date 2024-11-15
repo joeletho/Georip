@@ -794,7 +794,10 @@ def ndvi_to_yolo_dataset(
     background_bias=None,
     min_labels_required=10,
     pbar_leave=True,
+    num_workers=None,
 ):
+    ignore_empty_geom = ignore_empty_geom and background_bias is None
+
     gdf, (meta_dir, chips_dir, output_fname) = make_ndvi_dataset(
         shp_file,
         ndvi_dir,
@@ -810,9 +813,10 @@ def ndvi_to_yolo_dataset(
         exist_ok=exist_ok,
         save_csv=save_csv,
         save_shp=save_shp,
-        ignore_empty_geom=ignore_empty_geom and background_bias is None,
+        ignore_empty_geom=ignore_empty_geom,
         tif_to_png=tif_to_png,
         pbar_leave=False,
+        num_workers=num_workers,
     )
 
     csv_dir = meta_dir / "csv"
@@ -821,7 +825,9 @@ def ndvi_to_yolo_dataset(
     n_calls = 3
     n_calls += 1 if generate_labels else 0
     n_calls += 1 if generate_train_data else 0
-    pbar = trange(n_calls, desc="Creating YOLO dataset - Encoding classes", leave=pbar_leave)
+    pbar = trange(
+        n_calls, desc="Creating YOLO dataset - Encoding classes", leave=pbar_leave
+    )
 
     gdf = encode_classes(gdf, encoder)
     if save_csv or save_shp:
@@ -834,9 +840,11 @@ def ndvi_to_yolo_dataset(
                 shp_dir / output_fname.with_suffix(".shp"),
             )
 
+    print("Number of rows before prune:", len(gdf))
     labeled_images = gdf.loc[gdf["class_id"] != -1].values.tolist()
+    print("Number of labeled images:", len(labeled_images))
 
-    if background_bias is None:
+    if ignore_empty_geom or background_bias is None:
         new_rows = labeled_images
     else:
         background_images = gdf.loc[gdf["class_id"] == -1].values.tolist()
@@ -846,8 +854,10 @@ def ndvi_to_yolo_dataset(
             : int(len(labeled_images) * background_bias)
         ]
 
+        print("Number of background images:", len(background_images))
         new_rows = labeled_images + background_images
 
+    print("Number of rows after prune:", len(new_rows))
     gdf = gpd.GeoDataFrame(new_rows, columns=gdf.columns, crs=gdf.crs)
     pbar.update()
 

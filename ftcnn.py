@@ -4,8 +4,9 @@ import sys
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ctypes import ArgumentError
+from multiprocessing import Process
 from pathlib import Path
-from time import time
+from time import sleep, time
 from types import FunctionType
 
 import geopandas as gpd
@@ -28,8 +29,24 @@ from .utils import (clear_directory, collect_files_with_suffix, get_cpu_count,
 
 TQDM_INTERVAL = 1 / 100
 
+
 warnings.filterwarnings("ignore", "GeoSeries.notna", UserWarning)
 gdal.UseExceptions()
+
+_writelock = False
+
+
+def __request_writelock__():
+    global _writelock
+    while _writelock:
+        sleep(1 / 50)
+    _writelock = True
+    return _writelock
+
+
+def __free_writelock__():
+    global _writelock
+    _writelock = False
 
 
 def open_geo_ds(path):
@@ -227,6 +244,7 @@ def preprocess_shapefile(
         gdf = gdf[(gdf[start_year_col] == years[0]) & (gdf[end_year_col] == years[1])]
 
     gdf = flatten_geom(gdf, id_column=id_column, leave=leave)
+    gdf = gdf.drop_duplicates()
     gdf = map_metadata(
         gdf,
         start_year_col=start_year_col,
@@ -234,6 +252,7 @@ def preprocess_shapefile(
         img_dir=img_dir,
         leave=leave,
     )
+    gdf = gdf.drop_duplicates()
     return gpd.GeoDataFrame(gdf, crs=crs)
 
 
@@ -442,6 +461,8 @@ def write_chip(data, *, transform, meta, output_path=None):
             "transform": transform,
         }
     )
+    res = None
+    __request_writelock__()
     if output_path is None:
         # Create an in-memory Image
         chip = io.BytesIO()
@@ -450,10 +471,12 @@ def write_chip(data, *, transform, meta, output_path=None):
                 dest.write(data, 1)
             with mem.open() as src:
                 arr = src.read(1)
-                return arr.reshape(data.shape)
+                res = arr.reshape(data.shape)
     else:
         with rasterio.open(output_path, "w", **meta) as dest:
             dest.write(data, 1)  # 1 --> single-band
+    __free_writelock__()
+    return res
 
 
 def create_chips_from_geotiff(
@@ -462,7 +485,6 @@ def create_chips_from_geotiff(
     geotiff_path = Path(geotiff_path)
     width = chip_size[0]
     height = chip_size[1]
-    chips = []
 
     with rasterio.open(geotiff_path, crs=crs) as src:
         bounds = src.bounds
@@ -476,14 +498,15 @@ def create_chips_from_geotiff(
             height = rmax - rmin
 
         if width <= 0 or height <= 0:
-            return []
+            return
 
-        total_updates = rmax // height
+        total_updates = (rmax // height) * (cmax // width)
         updates = 0
         start = time()
         pbar = trange(
             total_updates, desc=f"Processing {geotiff_path.name}", leave=leave
         )
+
         for row in range(rmin, rmax, height):
             for col in range(cmin, cmax, width):
                 chip_output_path = None
@@ -498,13 +521,14 @@ def create_chips_from_geotiff(
                         )
                     output_dir.mkdir(parents=True, exist_ok=True)
 
-                chip_height = row + height - 1
                 rem_height = rmax - row - 1
-                chip_width = col + width - 1
                 rem_width = cmax - col - 1
-                chip_window = Window.from_slices(
-                    rows=(row, min(chip_height, rem_height)),
-                    cols=(col, min(chip_width, rem_width)),
+
+                chip_window = Window(
+                    col_off=col,
+                    row_off=row,
+                    width=min(width, rem_width),
+                    height=min(height, rem_height),
                 )
                 chip_data = src.read(1, window=chip_window)
 
@@ -518,24 +542,21 @@ def create_chips_from_geotiff(
                     continue
 
                 chip_transform = src.window_transform(chip_window)
-                chip = write_chip(
+                _ = write_chip(
                     chip_data,
                     transform=chip_transform,
                     meta=src.meta.copy(),
                     output_path=chip_output_path,
                 )
-                chips.append((chip, src.xy(row, col, offset="ul")))
-            if time() - start >= TQDM_INTERVAL:
-                pbar.update()
-                updates += 1
-                start = time()
+                if time() - start >= TQDM_INTERVAL:
+                    pbar.update()
+                    updates += 1
+                    start = time()
     if leave:
         pbar.set_description(f"{geotiff_path.name} processed.")
     if updates < total_updates:
         pbar.update(total_updates - updates)
     pbar.close()
-
-    return chips
 
 
 def collect_filepaths(df: pd.DataFrame, column_name):
@@ -600,6 +621,7 @@ def preprocess_ndvi_difference_geotiffs(
     clean_dest=False,
     ignore_empty_geom=True,
     leave=True,
+    num_workers=None,
 ):
     imgs = preprocess_geotiff_dataset(
         gdf,
@@ -621,7 +643,10 @@ def preprocess_ndvi_difference_geotiffs(
         leave=leave,
     )
 
-    with ThreadPoolExecutor(max_workers=get_cpu_count()) as executor:
+    num_workers = num_workers if num_workers else get_cpu_count()
+
+    # Make the chips for each GeoTIFF
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = [
             executor.submit(
                 create_chips_from_geotiff,
@@ -668,6 +693,7 @@ def preprocess_ndvi_difference_geotiffs(
     )
     pbar.close()
 
+    gdf = gdf.drop_duplicates()
     return gdf.reset_index(drop=True)
 
 
@@ -690,6 +716,7 @@ def make_ndvi_dataset(
     ignore_empty_geom=True,
     tif_to_png=True,
     pbar_leave=True,
+    num_workers=None,
 ):
     if shp_file is None:
         raise ArgumentError("Missing path to shape file")
@@ -768,6 +795,7 @@ def make_ndvi_dataset(
         exist_ok=exist_ok,
         ignore_empty_geom=ignore_empty_geom,
         leave=False,
+        num_workers=num_workers,
     )
     pbar.update()
 
@@ -858,7 +886,6 @@ def map_geometry_to_geotiffs(
 ) -> gpd.GeoDataFrame:
     img_dir = Path(img_dir).resolve()
     columns = [
-        "parent",
         "filename",
         "path",
         "width",
@@ -874,8 +901,9 @@ def map_geometry_to_geotiffs(
         leave=False,
     ):
         with rasterio.open(path) as src:
-            # Maybe use Window.from_slices(rows=(0, n_rows), cols=(0, n_cols)), which is more explicit
-            chip_window = Window.from_slices(rows=(0, src.height), cols=(0, src.width))
+            chip_window = Window(
+                col_off=0, row_off=0, width=src.width, height=src.height
+            )
             chip_polygon = create_chip_polygon(src, chip_window)
             intersecting_polygons = gdf.loc[gdf.intersects(chip_polygon)]
 
@@ -889,16 +917,16 @@ def map_geometry_to_geotiffs(
             if not intersecting_polygons.empty:
                 for _, polygon_row in intersecting_polygons.iterrows():
                     geometry.append(polygon_row["geometry"].intersection(chip_polygon))
-                    row["parent"] = str(polygon_row["path"])
                     rows.append(row)
             else:
                 geometry.append(Polygon())
-                row["parent"] = ""
                 rows.append(row)
 
     return gpd.GeoDataFrame(
-        rows, columns=columns, geometry=geometry, crs=gdf.crs
-    ).explode()
+        gpd.GeoDataFrame(rows, columns=columns, geometry=geometry, crs=gdf.crs)
+        .explode()
+        .drop_duplicates()
+    )
 
 
 def translate_xy_coords_to_index(gdf: gpd.GeoDataFrame, *, leave=True):
@@ -1004,8 +1032,8 @@ def clip_points(points, shape):
 
 
 def tiff_to_png(tiff, out_path=None):
-    if isinstance(tiff, str):
-        src_ds = gdal.Open(tiff)
+    if isinstance(tiff, str) or isinstance(tiff, Path):
+        src_ds = open_geo_ds(tiff)
     else:
         src_ds = gdal_array.OpenArray(tiff)
 
@@ -1016,36 +1044,43 @@ def tiff_to_png(tiff, out_path=None):
     data = linterp(data, 0, 1)
     width = src_ds.RasterXSize
     height = src_ds.RasterYSize
+    src_ds = None
 
     driver = gdal.GetDriverByName("MEM")
-    rgb_ds = driver.Create("/tmp/png-from-tiff.tif", width, height, 3, gdal.GDT_Float64)
+    rgb_ds = driver.Create("", width, height, 3, gdal.GDT_Float64)
 
     for band in range(1, 4):
         rgb_ds.GetRasterBand(band).WriteArray(data)
         rgb_ds.GetRasterBand(band).SetNoDataValue(-1)
+
+    __request_writelock__()
     rgb_ds.FlushCache()
+    __free_writelock__()
 
     png_data = rgb_ds.ReadAsArray()
-    png_data = linterp(png_data, 0, 1)
+    rgb_ds = None
+
     # Left-rotate the array from 1, height, width to height, width, 1
     png_data = np.moveaxis(png_data, 0, -1)
 
-    png_data = img_as_float(png_data)
+    png_img = (img_as_float(png_data) * 255).astype(np.uint8)
     if out_path is not None:
-        skio.imsave(out_path, (png_data * 255).astype(np.uint8), check_contrast=False)
-    rgb_ds = None
-    src_ds = None
+        __request_writelock__()
+        skio.imsave(out_path, png_img, check_contrast=False)
+        __free_writelock__()
 
-    return (png_data * 255).astype(np.uint8)
+    return png_img
 
 
-def normalize_tiff(src_path, dest, *, vmin=None, vmax=None):
+def normalize_tiff(src_path, dest):
     src_ds = open_geo_ds(src_path)
 
     translate_opts = ["-ot", "Byte", "-co", "TILED=YES", "-a_nodata", "0", "-scale"]
 
     # Translate and save the image
-    dest_ds = gdal.Translate(dest, src_ds, options=" ".join(translate_opts))
+    __request_writelock__()
+    dest_ds = gdal.Translate(str(dest), src_ds, options=" ".join(translate_opts))
+    __free_writelock__()
 
     # Free the ds memory
     src_ds = None
@@ -1066,33 +1101,35 @@ def process_geotiff_to_png_conversion(
     elif clear_dir:
         clear_directory(dest_dir)
 
-    minval = sys.maxsize
-    maxval = -sys.maxsize
-
-    for path in src_paths:
+    def __exec__(idx, path):
         ds = open_geo_ds(path)
         for i in range(1, ds.RasterCount):
             rb = ds.GetRasterBand(i)
             rb.SetNoDataValue(0)
-            arr = rb.ReadAsArray()
-            minval = min(minval, np.min(arr))
-            maxval = max(maxval, np.max(arr))
         ds = None
 
-    pbar = trange(len(src_paths), desc="Converting TIFF to PNG", leave=leave)
-    for path in src_paths:
         if preserve_dir:
-            relpath = Path(os.path.relpath(path, src_dir))
-            dest_path = Path(dest_dir, relpath.with_suffix(".png"))
+            relpath = path.relative_to(src_dir)
+            dest_path = dest_dir / relpath.with_suffix(".png")
         else:
-            dest_path = dest_dir / path.with_suffix(".png").name
+            dest_path = dest_dir / f"{path.name}.png"
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-        norm_path = "/tmp/norm.tif"
-        normalize_tiff(path, norm_path, vmin=minval, vmax=maxval)
+        norm_path = Path(f"/tmp/norm_{idx}.tif").resolve()
+        normalize_tiff(path, norm_path)
         tiff_to_png(norm_path, dest_path)
         file_map[path.stem] = {"tif": path, "png": dest_path}
-        pbar.update()
+        return norm_path
+
+    pbar = trange(len(src_paths), desc="Converting TIFF to PNG", leave=leave)
+    with ThreadPoolExecutor(max_workers=get_cpu_count() // 2) as executor:
+        futures = [
+            executor.submit(__exec__, i, path) for i, path in enumerate(src_paths)
+        ]
+        for future in as_completed(futures):
+            tmp_path = future.result()
+            tmp_path.unlink()
+            pbar.update()
     if leave:
         pbar.set_description("Complete")
     pbar.close()
