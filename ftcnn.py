@@ -1122,7 +1122,7 @@ def process_geotiff_to_png_conversion(
         return norm_path
 
     pbar = trange(len(src_paths), desc="Converting TIFF to PNG", leave=leave)
-    with ThreadPoolExecutor(max_workers=get_cpu_count() // 2) as executor:
+    with ThreadPoolExecutor(max_workers=get_cpu_count()) as executor:
         futures = [
             executor.submit(__exec__, i, path) for i, path in enumerate(src_paths)
         ]
