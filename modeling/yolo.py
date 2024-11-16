@@ -21,10 +21,10 @@ from torchvision.io import read_image
 from torchvision.transforms.v2 import functional as F
 from tqdm.auto import tqdm, trange
 
-from ftcnn import encode_default_classes
 from ftcnn.ftcnn import (chip_geotiff_and_convert_to_png, clear_directory,
-                         encode_classes, get_cpu_count, make_ndvi_dataset,
-                         save_as_csv, save_as_shp, stringify_points)
+                         encode_classes, encode_default_classes, get_cpu_count,
+                         make_ndvi_dataset, save_as_csv, save_as_shp,
+                         stringify_points)
 
 from .types import BBox, XYInt, YOLODataset
 from .utils import (display_image_and_annotations,
