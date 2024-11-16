@@ -21,6 +21,7 @@ from torchvision.io import read_image
 from torchvision.transforms.v2 import functional as F
 from tqdm.auto import tqdm, trange
 
+from ftcnn import encode_default_classes
 from ftcnn.ftcnn import (chip_geotiff_and_convert_to_png, clear_directory,
                          encode_classes, get_cpu_count, make_ndvi_dataset,
                          save_as_csv, save_as_shp, stringify_points)
@@ -778,7 +779,7 @@ def ndvi_to_yolo_dataset(
     chip_size=None,
     clean_dest=False,
     xy_to_index=True,
-    encoder=encode_classes,
+    encoder=encode_default_classes,
     exist_ok=False,
     save_csv=False,
     save_shp=False,
