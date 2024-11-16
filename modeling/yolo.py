@@ -830,15 +830,6 @@ def ndvi_to_yolo_dataset(
     )
 
     gdf = encode_classes(gdf, encoder)
-    if save_csv or save_shp:
-        output_fname = Path(f"{output_fname}_encoded")
-        if save_csv:
-            save_as_csv(gdf, csv_dir / output_fname.with_suffix(".csv"))
-        if save_shp:
-            save_as_shp(
-                gdf,
-                shp_dir / output_fname.with_suffix(".shp"),
-            )
 
     labeled_images = gdf.loc[gdf["class_id"] != -1].values.tolist()
 
@@ -855,6 +846,16 @@ def ndvi_to_yolo_dataset(
         new_rows = labeled_images + background_images
 
     gdf = gpd.GeoDataFrame(new_rows, columns=gdf.columns, crs=gdf.crs)
+
+    if save_csv or save_shp:
+        output_fname = Path(f"{output_fname}_encoded")
+        if save_csv:
+            save_as_csv(gdf, csv_dir / output_fname.with_suffix(".csv"))
+        if save_shp:
+            save_as_shp(
+                gdf,
+                shp_dir / output_fname.with_suffix(".shp"),
+            )
     pbar.update()
 
     if len(gdf) < min_labels_required:
