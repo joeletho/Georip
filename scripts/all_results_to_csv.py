@@ -42,6 +42,55 @@ def parse_metrics(path):
     data = {}
     line = ""
     with open(path, "rb") as f:
+        train_images = None
+        train_bg = None
+        train_corrupt = None
+        val_images = None
+        val_bg = None
+        val_corrupt = None
+
+        for line in f:
+            line = line.decode("utf-8")
+            if (
+                not train_images
+                and "train:" in line
+                or not val_images
+                and "val:" in line
+            ):
+                parts = line.split()
+                if len(parts) < 9:
+                    continue
+
+                indices = []
+                for i, part in enumerate(parts):
+                    if "train:" in part or "val:" in part:
+                        indices.append(i)
+
+                last = indices[-1]
+                imgs = int(parts[last + 3])
+                bgs = int(parts[last + 5])
+                corr = int(parts[last + 7])
+
+                if "train:" in parts[last]:
+                    train_images = imgs
+                    train_bg = bgs
+                    train_corrupt = corr
+                else:
+                    val_images = imgs
+                    val_bg = bgs
+                    val_corrupt = corr
+
+            if train_images and val_images:
+                break
+
+        if train_images is None or train_bg is None or train_corrupt is None:
+            raise ValueError(
+                f"Error finding parsing image data in '{path.name}': missing train image data"
+            )
+        if val_images is None or val_bg is None or val_corrupt is None:
+            raise ValueError(
+                f"Error finding parsing image data in '{path.name}': missing val image data"
+            )
         f.seek(0, os.SEEK_END)
         size = f.tell()
         curr = size
@@ -83,6 +132,15 @@ def parse_metrics(path):
             )
 
         data = {
+            "images": [train_images + val_images],
+            "backgrounds": [train_bg + val_bg],
+            "corrupt": [train_corrupt + val_corrupt],
+            "train_images": [train_images],
+            "train_background": [train_bg],
+            "train_corrupt": [train_corrupt],
+            "val_images": [val_images],
+            "val_background": [val_bg],
+            "val_corrupt": [val_corrupt],
             "box_p": [metrics[3]],
             "box_r": [metrics[4]],
             "box_map50": [metrics[5]],
@@ -93,20 +151,14 @@ def parse_metrics(path):
             "mask_map50-95)": [metrics[10]],
         }
 
-    if len(data) != 8:
-        raise ValueError(
-            f"Error parsing metrics in '{path.name}': incorrect number of parsed metrics"
-        )
+    if len(data) == 0:
+        raise ValueError(f"Error parsing metrics in '{path.name}': missing data")
 
     return pd.DataFrame.from_dict(data)
 
 
 def parse_stats(path):
     data = {
-        "model": [],
-        "batch": [],
-        "freeze": [],
-        "iou": [],
         "treatment": [],
         "start_year": [],
         "end_year": [],
@@ -114,8 +166,12 @@ def parse_stats(path):
         "split": [],
         "mode": [],
         "shuffle_split": [],
-        "background": [],
+        "background_factor": [],
         "shuffle_background": [],
+        "model": [],
+        "batch": [],
+        "freeze": [],
+        "iou": [],
     }
     lines = None
     with open(path) as f:
@@ -166,14 +222,16 @@ def parse_stats(path):
                 data["mode"].append(parts[5].split("=")[1])
                 data["shuffle_split"].append(bool(parts[6].split("=")[1]))
 
-                data["background"].append(parts[7].split("=")[1])
+                data["background_factor"].append(parts[7].split("=")[1])
                 next = 8
                 if not parts[next].isnumeric():
-                    if data["background"][-1].isnumeric():
-                        data["background"][-1] = int(data["background"])
+                    if data["background_factor"][-1].isnumeric():
+                        data["background_factor"][-1] = int(data["background"])
+                    else:
+                        data["background_factor"][-1] = "None"
                 else:
-                    data["background"][-1] = ".".join(
-                        [data["background"][-1], parts[next]]
+                    data["background_factor"][-1] = ".".join(
+                        [data["background_factor"][-1], parts[next]]
                     )
 
                     next += 1
@@ -189,6 +247,8 @@ def parse_stats(path):
                             data[key].append(int(val))
                     else:
                         data[key].append(val)
+    if not isinstance(data["freeze"][-1], int):
+        data["freeze"][-1] = "None"
 
     return pd.DataFrame.from_dict(data)
 
@@ -226,7 +286,14 @@ def exec_program(dir, args):
         df_existing = pd.read_csv(args.output_file)
         df = pd.concat([df_existing, df], ignore_index=True)
 
-    df.to_csv(args.output_file, index=False)
+    if len(args.sort_by) > 0:
+        ascend = args.ascending
+        if not ascend:
+            ascend = True
+        for col in args.sort_by:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.sort_values(args.sort_by, ascending=ascend)
+    df.to_csv(args.output_file, index=False, na_rep="None")
     print(f"Saved to {args.output_file}")
 
 
@@ -249,6 +316,18 @@ if __name__ == "__main__":
     parser.add_argument("-r", "--recursive", default=False, action="store_true")
     parser.add_argument("-m", "--mode", type=str, default="w")
     parser.add_argument("-l", "--levels", type=int, default=1)
+    parser.add_argument(
+        "-s",
+        "--sort_by",
+        type=lambda s: [s.strip() for s in s.split(",")],
+        required=False,
+    )
+    parser.add_argument(
+        "-a",
+        "--ascending",
+        type=lambda s: [bool(s.strip()) for s in s.split(",")],
+        required=False,
+    )
 
     args = parser.parse_args()
 
