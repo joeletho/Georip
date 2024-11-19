@@ -10,7 +10,6 @@ from ctypes import ArgumentError
 from pathlib import Path
 from time import sleep, time
 from types import FunctionType
-from typing import Annotated
 from xml.etree import ElementTree as ET
 
 import cv2
@@ -21,11 +20,17 @@ import rasterio
 import skimage
 import supervision as sv
 import torch
+import yaml
 from matplotlib import pyplot as plt
 from numpy import NaN
-from PIL import Image
+from PIL import Image, ImageDraw
+from torchvision import tv_tensors
+from torchvision.io import read_image
+from torchvision.transforms import v2 as T
+from torchvision.transforms.v2 import functional as F
 from tqdm.auto import tqdm, trange
 
+from ftcnn.modeling.maskrcnn import collate_fn
 from ftcnn.utils import (clear_directory, collect_files_with_suffix,
                          get_cpu_count)
 
@@ -52,6 +57,7 @@ class BBox(Serializable):
 
     def __eq__(self, other):
         return isinstance(other, BBox) and hash(self) == hash(other)
+
     def __hash__(self):
         return hash((self.x, self.y, self.width, self.height))
 
@@ -79,11 +85,14 @@ class ImageData(Serializable):
         return isinstance(other, ImageData) and hash(self) == hash(other)
 
     def __hash__(self):
-        return hash((
-            self.shape[0],
-            self.shape[1],
-            self.filepath,
-        ))
+        return hash(
+            (
+                self.shape[0],
+                self.shape[1],
+                self.filepath,
+            )
+        )
+
 
 class AnnotatedLabel(Serializable):
     def __init__(
@@ -117,7 +126,7 @@ class AnnotatedLabel(Serializable):
                 self.bbox,
                 str(self.segments),
                 self.image_filename,
-                self.filepath
+                self.filepath,
             )
         )
 
@@ -164,6 +173,15 @@ class AnnotatedLabel(Serializable):
                 )
 
         return annotations
+
+
+class XMLTree:
+    def __init__(self, filepath: str):
+        self.filepath: str = filepath
+        self.tree = ET.parse(filepath)
+
+    def root(self):
+        return self.tree.getroot()
 
 
 class YOLODataset(Serializable):
@@ -881,13 +899,392 @@ class YOLODataset(Serializable):
         return train_ds, val_ds
 
 
-class XMLTree:
-    def __init__(self, filepath: str):
-        self.filepath: str = filepath
-        self.tree = ET.parse(filepath)
+class YOLODatasetLoader(torch.utils.data.Dataset):
+    def __init__(
+        self, classes, images_dir, annotations_dir, transforms=None, recurse=False
+    ):
+        """
+        Args:
+            images_dir (str): Directory where the images are stored.
+            annotations_dir (str): Directory where the YOLO annotation files are stored.
+            transforms (callable, optional): Optional transform to be applied on a sample.
+        """
+        if not isinstance(classes, list):
+            classes = [classes]
+        self.classes = classes
+        self.images_dir = Path(images_dir).resolve()
+        self.labels_dir = Path(annotations_dir).resolve()
+        self.transforms = transforms
 
-    def root(self):
-        return self.tree.getroot()
+        def get_image_paths(dir, paths, recurse=recurse):
+            for path in dir.iterdir():
+                if not path.is_file():
+                    if recurse:
+                        get_image_paths(path, paths, recurse)
+                    continue
+                if str(path.suffix).lower() in (".png", ".jpg", ".jpeg"):
+                    paths.append(path)
+
+        self.image_paths = []
+        get_image_paths(self.images_dir, self.image_paths, recurse)
+        self.image_paths.sort()
+
+    def __getitem__(self, idx):
+        # Get image file name and corresponding annotation file
+        image_file = self.image_paths[idx]
+        image_path = self.images_dir / image_file
+        label_path = self.labels_dir / Path(image_file.stem).with_suffix(".txt")
+
+        # Load the image
+        image = read_image(image_path)
+        image = tv_tensors.Image(image)
+
+        # Get image dimensions
+        img_height, img_width = F.get_size(image)  # returns (H, W)
+
+        # Initialize lists for boxes, labels, masks
+        boxes = []
+        labels = []
+        masks = []
+
+        # Check if annotation file exists
+        if label_path.exists():
+            with open(label_path, "r") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) < 5:
+                        continue  # Skip invalid lines
+
+                    class_id = int(parts[0])
+
+                    if len(parts) == 5:
+                        # Standard YOLO format: class_id x_center y_center width height
+                        x_center = float(parts[1])
+                        y_center = float(parts[2])
+                        width = float(parts[3])
+                        height = float(parts[4])
+
+                        # Convert from normalized coordinates to pixel coordinates
+                        x_center *= img_width
+                        y_center *= img_height
+                        width *= img_width
+                        height *= img_height
+
+                        # Convert from center coordinates to corner coordinates
+                        x_min = x_center - width / 2
+                        y_min = y_center - height / 2
+                        x_max = x_center + width / 2
+                        y_max = y_center + height / 2
+
+                        boxes.append([x_min, y_min, x_max, y_max])
+                        labels.append(class_id)
+
+                        # Create a mask from the bounding box
+                        mask = torch.zeros((img_height, img_width), dtype=torch.uint8)
+                        x_min_int = int(round(x_min))
+                        y_min_int = int(round(y_min))
+                        x_max_int = int(round(x_max))
+                        y_max_int = int(round(y_max))
+                        mask[y_min_int:y_max_int, x_min_int:x_max_int] = 1
+                        masks.append(mask.numpy())
+                    else:
+                        # Assume the rest of the parts are polygon coordinates
+                        # Format: class_id x1 y1 x2 y2 x3 y3 ... xn yn
+                        coords = list(map(float, parts[1:]))
+                        if len(coords) % 2 != 0:
+                            continue  # Invalid polygon
+
+                        x_coords = coords[::2]
+                        y_coords = coords[1::2]
+
+                        # Convert normalized coordinates to pixel coordinates
+                        x_coords = [x * img_width for x in x_coords]
+                        y_coords = [y * img_height for y in y_coords]
+
+                        # Create a polygon
+                        polygon = [(x, y) for x, y in zip(x_coords, y_coords)]
+
+                        # Create a mask from the polygon
+                        mask_img = Image.new("L", (img_width, img_height), 0)
+                        ImageDraw.Draw(mask_img).polygon(polygon, outline=1, fill=1)
+                        mask = np.array(mask_img, dtype=np.uint8)
+                        masks.append(mask)
+
+                        # Compute bounding box
+                        x_min = min(x_coords)
+                        x_max = max(x_coords)
+                        y_min = min(y_coords)
+                        y_max = max(y_coords)
+                        boxes.append([x_min, y_min, x_max, y_max])
+                        labels.append(class_id)
+
+        else:
+            # If annotation file doesn't exist, return empty annotations
+            boxes = []
+            labels = []
+            masks = []
+
+        # Convert to tensors
+        if len(boxes) > 0:
+            boxes = tv_tensors.BoundingBoxes(
+                boxes, format="XYXY", canvas_size=F.get_size(image)
+            )
+            labels = torch.as_tensor(labels, dtype=torch.int64)
+            masks = tv_tensors.Mask(masks)
+            # Compute area
+            area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+            area = torch.as_tensor(area, dtype=torch.float32)
+            iscrowd = torch.zeros((len(labels),), dtype=torch.int64)
+        else:
+            boxes = tv_tensors.BoundingBoxes(
+                torch.zeros((0, 4)), format="XYXY", canvas_size=F.get_size(image)
+            )
+            labels = torch.empty(0, dtype=torch.int64)
+            masks = tv_tensors.Mask(torch.zeros((0, *F.get_size(image))))
+            area = torch.empty(0, dtype=torch.float32)
+            iscrowd = torch.empty(0, dtype=torch.int64)
+
+        image_id = idx
+
+        # Prepare the target dictionary
+        target = {
+            "boxes": boxes,
+            "labels": labels,
+            "masks": masks,
+            "image_id": image_id,
+            "area": area,
+            "iscrowd": iscrowd,
+        }
+
+        print("Applying transform")
+        # Apply transforms
+        if self.transforms is not None:
+            image, target = self.transforms(image, target)
+        print("Applied")
+
+        return image, target
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def make_datasets(
+        self,
+        batch_train,
+        batch_val,
+        split_ratio=0.75,
+        shuffle_train=True,
+        shuffle_val=False,
+    ):
+        # Calculate split sizes for 70% train, 20% validation, and 10% test
+        train_split_ratio = split_ratio
+        val_split_ratio = 1 - split_ratio
+
+        train_size = int(len(self) * train_split_ratio)
+        val_size = int(len(self) * val_split_ratio)
+
+        # Generate random indices for splitting
+        indices = torch.randperm(len(self)).tolist()
+        train_indices = indices[:train_size]
+        val_indices = indices[train_size : train_size + val_size]
+
+        # Create training, validation, and test subsets
+        train_dataset = torch.utils.data.Subset(self, train_indices)
+        dataset_val = torch.utils.data.Subset(self, val_indices)
+
+        # Define the training data loader using the subset
+        data_loader_train = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=batch_train,
+            shuffle=shuffle_train,
+            collate_fn=maskrcnn.collate_fn,
+        )
+
+        data_loader_val = torch.utils.data.DataLoader(
+            dataset_val,
+            batch_size=batch_val,
+            shuffle=shuffle_val,
+            collate_fn=collate_fn,
+        )
+
+        return data_loader_train, data_loader_val
+
+    @staticmethod
+    def get_data_loaders_from_yaml(
+        data_yaml,
+        batch_train,
+        batch_val,
+        imgsz=None,
+        shuffle_train=False,
+        shuffle_val=False,
+        transform=True,
+        train=True,
+        **transform_kwargs,
+    ):
+        with open(data_yaml, "r") as file:
+            data = yaml.safe_load(file)
+
+        root_path = Path(data.get("path", ""))
+        train_path = Path(data.get("train", ""))
+        val_path = Path(data.get("val", ""))
+        names = data.get("names", {})
+        classes = list(names.values())
+
+        train_images_path = root_path / train_path
+        train_labels_path = (
+            root_path / "labels" / "/".join(str(part) for part in train_path.parts[1:])
+        )
+        val_images_path = root_path / val_path
+        val_labels_path = (
+            root_path / "labels" / "/".join(str(part) for part in val_path.parts[1:])
+        )
+
+        ds_train = YOLODatasetLoader(
+            classes,
+            train_images_path,
+            train_labels_path,
+            transforms=(
+                maskrcnn_get_transform(train=train, imgsz=imgsz, **transform_kwargs)
+                if transform
+                else None
+            ),
+        )
+        ds_val = YOLODatasetLoader(
+            classes,
+            val_images_path,
+            val_labels_path,
+            transforms=(
+                maskrcnn_get_transform(train=train, imgsz=imgsz, **transform_kwargs)
+                if transform
+                else None
+            ),
+        )
+        loader_train = torch.utils.data.DataLoader(
+            ds_train,
+            batch_size=batch_train,
+            shuffle=shuffle_train,
+            collate_fn=collate_fn,
+        )
+        loader_val = torch.utils.data.DataLoader(
+            ds_val,
+            batch_size=batch_val,
+            shuffle=shuffle_val,
+            collate_fn=collate_fn,
+        )
+
+        return classes, (loader_train, loader_val), (ds_train, ds_val)
+        #
+        # train = {
+        #     "images": [],
+        #     "labels": [],
+        # }
+        #
+        # val = {
+        #     "images": [],
+        #     "labels": [],
+        # }
+        #
+        # # Get all images
+        # for i, parent in enumerate([train_images_path, val_images_path]):
+        #     for path in parent.iterdir():
+        #         if not path.is_file():
+        #             continue
+        #         if i % 2:
+        #             val["images"].append(path)
+        #         else:
+        #             train["images"].append(path)
+        #
+        # # Match image paths to labels
+        # for type in ["train", "val"]:
+        #     data = None
+        #     label_paths = None
+        #     if type == "train":
+        #         data = train
+        #         label_paths = [
+        #             path
+        #             for path in train_labels_path.iterdir()
+        #             if path.suffix == ".txt"
+        #         ]
+        #     else:
+        #         data = val
+        #         label_paths = [
+        #             path for path in val_labels_path.iterdir() if path.suffix == ".txt"
+        #         ]
+        #
+        #     for i, img_path in enumerate(data["images"]):
+        #         found = False
+        #         for lbl_path in label_paths:
+        #             if lbl_path.stem == img_path.stem:
+        #                 data["labels"].append(str(lbl_path))
+        #                 data["images"][i] = str(img_path)
+        #                 found = True
+        #         if not found:
+        #             raise FileNotFoundError(
+        #                 f"Label path for image '{img_path.name}' not found in '{train_path if type == 'train' else val_path}'"
+        #             )
+        #
+        # dl_args = {
+        #     0: {
+        #         "batch": batch_train,
+        #         "shuffle": shuffle_train,
+        #     },
+        #     1: {
+        #         "batch": batch_val,
+        #         "shuffle": shuffle_val,
+        #     },
+        # }
+        #
+        # # https://github.com/pytorch/vision/blob/main/references/detection/utils.py
+        # def collate_fn(batch):
+        #     return tuple(zip(*batch))
+        #
+        # data_loaders = []
+        # for i, data in enumerate([train, val]):
+        #     ds = TensorDataset(
+        #         torch.as_tensor(data["images"]), torch.as_tensor(data["labels"])
+        #     )
+        #     data_loaders.append(
+        #         torch.utils.data.DataLoader(
+        #             ds,
+        #             batch_size=dl_args[i]["batch"],
+        #             shuffle=dl_args[i]["shuffle"],
+        #             collate_fn=collate_fn,
+        #         )
+        #     )
+
+        # return classes, ds_train, ds_val
+
+    def draw(
+        self,
+        show=True,
+        save_dir=None,
+        include_background=False,
+        verbose=False,
+        pbar=False,
+        leave=False,
+        pbar_desc="Drawing annotations",
+    ):
+        if pbar:
+            total_updates = len(self)
+            updates = 0
+            start = time()
+            pbar = trange(total_updates, desc=pbar_desc, leave=leave)
+        for i in range(len(self)):
+            display_image_and_annotations(
+                self,
+                idx=i,
+                save_dir=save_dir,
+                show=show,
+                include_background=include_background,
+                verbose=verbose,
+            )
+            if pbar and time() - start >= TQDM_INTERVAL:
+                pbar.update()
+                updates += 1
+                start = time()
+        if pbar:
+            if updates < total_updates:
+                pbar.update(total_updates - updates)
+            pbar.close()
 
 
 def copy_split_data(
@@ -1502,7 +1899,7 @@ def display_image_and_annotations(
     if len(target["masks"]) == 0 and not include_background:
         return
 
-    img_filepath = Path(dataset.img_files[idx])
+    img_filepath = Path(dataset.image_paths[idx])
 
     # Convert image to NumPy array
     if isinstance(img, torch.Tensor):
@@ -1599,3 +1996,31 @@ def display_image_and_annotations(
 
     # Close the plot to free memory
     plt.close()
+
+
+def maskrcnn_get_transform(
+    train: bool,
+    imgsz=None,
+    *,
+    augment=False,
+    flip_h: float = 0.2,
+    flip_v: float = 0.5,
+    rot_deg=(180,),
+    blur_kernel=(5, 9),
+    blur_sigma=(0.1, 5),
+):
+    transforms = []
+    if train:
+        # if imgsz is None:
+        #     raise ValueError("Missing required argument 'imgsz' for training")
+        if augment:
+            transforms.append(T.RandomHorizontalFlip(flip_h))
+            transforms.append(T.RandomVerticalFlip(flip_v))
+            transforms.append(T.RandomRotation(rot_deg))
+            transforms.append(T.GaussianBlur(kernel_size=blur_kernel, sigma=blur_sigma))
+
+        if imgsz is not None:
+            transforms.append(T.Resize(imgsz))
+    transforms.append(T.ToDtype(torch.float, scale=True))
+    transforms.append(T.ToPureTensor())
+    return T.Compose(transforms)

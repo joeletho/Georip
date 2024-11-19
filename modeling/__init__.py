@@ -1,4 +1,4 @@
-__all__ = ["coco", "pascalvoc", "types", "utils", "yolo"]
+__all__ = ["coco", "pascalvoc", "types", "utils", "yolo", "maskrcnn"]
 import ftcnn
 
-from . import coco, pascalvoc, types, utils, yolo
+from . import coco, maskrcnn, pascalvoc, types, utils, yolo

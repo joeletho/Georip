@@ -485,6 +485,7 @@ def create_chips_from_geotiff(
     geotiff_path = Path(geotiff_path)
     width = chip_size[0]
     height = chip_size[1]
+    chips = []
 
     with rasterio.open(geotiff_path, crs=crs) as src:
         bounds = src.bounds
@@ -498,7 +499,7 @@ def create_chips_from_geotiff(
             height = rmax - rmin
 
         if width <= 0 or height <= 0:
-            return
+            return []
 
         total_updates = (rmax // height) * (cmax // width)
         updates = 0
@@ -542,11 +543,16 @@ def create_chips_from_geotiff(
                     continue
 
                 chip_transform = src.window_transform(chip_window)
-                _ = write_chip(
-                    chip_data,
-                    transform=chip_transform,
-                    meta=src.meta.copy(),
-                    output_path=chip_output_path,
+                chips.append(
+                    (
+                        write_chip(
+                            chip_data,
+                            transform=chip_transform,
+                            meta=src.meta.copy(),
+                            output_path=chip_output_path,
+                        ),
+                        src.xy(row, col),
+                    )
                 )
                 if time() - start >= TQDM_INTERVAL:
                     pbar.update()
@@ -557,6 +563,7 @@ def create_chips_from_geotiff(
     if updates < total_updates:
         pbar.update(total_updates - updates)
     pbar.close()
+    return chips
 
 
 def collect_filepaths(df: pd.DataFrame, column_name):
@@ -575,7 +582,8 @@ def preprocess_geotiff_dataset(
     if years is None:
 
         def all_images(df):
-            return df.loc[:, img_path_col].unique().tolist()
+            images = df.loc[:, img_path_col].unique().tolist()
+            return images
 
         get_filepaths = all_images
     else:
