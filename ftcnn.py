@@ -547,6 +547,11 @@ def create_chips_from_geotiff(
                     or chip_data.shape[1] == 0
                     or chip_data.max() == 0
                     or chip_data.max() == src.nodata
+                ) or (
+                    # Set a threshold incase one or more of the dims are very small
+                    min(chip_data.shape[0], chip_data.shape[1])
+                    / max(chip_data.shape[0], chip_data.shape[1])
+                    < 0.1
                 ):
                     continue
 
