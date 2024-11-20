@@ -31,7 +31,7 @@ from torchvision.transforms.v2 import functional as F
 from tqdm.auto import tqdm, trange
 
 from ftcnn.modeling.maskrcnn import collate_fn
-from ftcnn.utils import (clear_directory, collect_files_with_suffix,
+from ftcnn.utils import (Lock, clear_directory, collect_files_with_suffix,
                          get_cpu_count)
 
 warnings.filterwarnings("ignore", "GeoSeries.notna", UserWarning)
@@ -185,7 +185,7 @@ class XMLTree:
 
 
 class YOLODataset(Serializable):
-    _lock = False
+    _lock = Lock()
     data_frame: pd.DataFrame
     class_map: dict[str, int]
     class_distribution: dict[str, int]
@@ -208,15 +208,13 @@ class YOLODataset(Serializable):
             self.compile(num_workers)
 
     def __request_lock__(self):
-        while self._lock:
+        while self._lock.is_locked():
             sleep(TQDM_INTERVAL)
-        self._lock = True
+        self._lock.lock()
         return self._lock
 
     def __free_lock__(self):
-        if not self._lock:
-            raise RuntimeError("Attempt to unlock a currently unlocked lock")
-        self._lock = False
+        self._lock.unlock()
 
     def get_num_classes(self):
         return len(self.class_map.keys()) if hasattr(self, "class_map") else 0
@@ -1745,7 +1743,9 @@ def make_dataset(
                 found = True
                 break
         if not found:
-            raise ValueError(f"Label for '{label_path.name}' not found")
+            print(f"Label for '{stem}' not found", file=sys.stderr)
+            label_paths.remove(label_path)
+            label_path.unlink()
 
     match (mode):
         case "all":

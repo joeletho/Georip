@@ -1,10 +1,8 @@
 import io
 import os
-import sys
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ctypes import ArgumentError
-from multiprocessing import Process
 from pathlib import Path
 from time import sleep, time
 from types import FunctionType
@@ -17,6 +15,7 @@ import rioxarray as rxr
 import shapely
 import skimage.io as skio
 from osgeo import gdal, gdal_array
+from pandas.compat import sys
 from PIL import Image
 from rasterio.windows import Window
 from shapely import normalize, wkt
@@ -24,29 +23,31 @@ from shapely.geometry import Polygon
 from skimage import img_as_float
 from tqdm.auto import tqdm, trange
 
-from .utils import (clear_directory, collect_files_with_suffix, get_cpu_count,
-                    linterp, pathify)
+from .utils import (Lock, clear_directory, collect_files_with_suffix,
+                    get_cpu_count, linterp, pathify)
 
 TQDM_INTERVAL = 1 / 100
 
+FTCNN_TMP_DIR = Path("/tmp", "ftcnn")
 
 warnings.filterwarnings("ignore", "GeoSeries.notna", UserWarning)
 gdal.UseExceptions()
 
-_writelock = False
+
+_writelock = Lock()
 
 
 def __request_writelock__():
     global _writelock
-    while _writelock:
+    while _writelock.is_locked():
         sleep(1 / 50)
-    _writelock = True
+    _writelock.lock()
     return _writelock
 
 
-def __free_writelock__():
-    global _writelock
-    _writelock = False
+def __free_writelock__(lock):
+    lock.unlock()
+    return None
 
 
 def open_geo_ds(path):
@@ -462,20 +463,26 @@ def write_chip(data, *, transform, meta, output_path=None):
         }
     )
     res = None
-    __request_writelock__()
-    if output_path is None:
-        # Create an in-memory Image
-        chip = io.BytesIO()
-        with rasterio.MemoryFile(chip) as mem:
-            with mem.open(**meta) as dest:
-                dest.write(data, 1)
-            with mem.open() as src:
-                arr = src.read(1)
-                res = arr.reshape(data.shape)
-    else:
-        with rasterio.open(output_path, "w", **meta) as dest:
-            dest.write(data, 1)  # 1 --> single-band
-    __free_writelock__()
+    lock = None
+    try:
+        lock = __request_writelock__()
+        if output_path is None:
+            # Create an in-memory Image
+            chip = io.BytesIO()
+            with rasterio.MemoryFile(chip) as mem:
+                with mem.open(**meta) as dest:
+                    dest.write(data, 1)
+                with mem.open() as src:
+                    arr = src.read(1)
+                    res = arr.reshape(data.shape)
+        else:
+            with rasterio.open(output_path, "w", **meta) as dest:
+                dest.write(data, 1)  # 1 --> single-band
+        lock = __free_writelock__(lock)
+    except Exception as e:
+        if lock is not None:
+            lock = __free_writelock__(lock)
+        raise (e)
     return res
 
 
@@ -532,6 +539,7 @@ def create_chips_from_geotiff(
                     height=min(height, rem_height),
                 )
                 chip_data = src.read(1, window=chip_window)
+                chip_data[chip_data == src.nodata] = np.NaN
 
                 # does the image have relevant data?
                 if (
@@ -1045,54 +1053,67 @@ def tiff_to_png(tiff, out_path=None):
     else:
         src_ds = gdal_array.OpenArray(tiff)
 
-    band = src_ds.GetRasterBand(1)
-    data = band.ReadAsArray()
+    lock = None
+    png_img = None
+    try:
+        src_width = src_ds.RasterXSize
+        src_height = src_ds.RasterYSize
 
-    # Interpolate values from -1,1 to 0,1
-    data = linterp(data, 0, 1)
-    width = src_ds.RasterXSize
-    height = src_ds.RasterYSize
-    src_ds = None
+        # Create a new in-memory dataset with 3 bands (for RGB)
+        rgb_ds = gdal.GetDriverByName("MEM").Create(
+            "", src_width, src_height, 3, gdal.GDT_Float64
+        )
 
-    driver = gdal.GetDriverByName("MEM")
-    rgb_ds = driver.Create("", width, height, 3, gdal.GDT_Float64)
+        # Read the data from the source band
+        raster_band = src_ds.GetRasterBand(1)
 
-    for band in range(1, 4):
-        rgb_ds.GetRasterBand(band).WriteArray(data)
-        rgb_ds.GetRasterBand(band).SetNoDataValue(-1)
+        # Store the nodata value
+        nodata_value = raster_band.GetNoDataValue()
 
-    __request_writelock__()
-    rgb_ds.FlushCache()
-    __free_writelock__()
+        # Read band data
+        data = raster_band.ReadAsArray()
 
-    png_data = rgb_ds.ReadAsArray()
-    rgb_ds = None
+        # Close the source
+        src_ds = None
 
-    # Left-rotate the array from 1, height, width to height, width, 1
-    png_data = np.moveaxis(png_data, 0, -1)
+        # Replace NoData values with NaN
+        if nodata_value is not None:
+            mask = data != nodata_value
+            data = np.where(mask, data, np.nan)
 
-    png_img = (img_as_float(png_data) * 255).astype(np.uint8)
-    if out_path is not None:
-        __request_writelock__()
-        skio.imsave(out_path, png_img, check_contrast=False)
-        __free_writelock__()
+        # Interpolate valid values, excluding NaN
+        valid_data = data[~np.isnan(data)]
+        if valid_data.size > 0:
+            data = np.interp(data, (valid_data.min(), valid_data.max()), (0, 1))
+        else:
+            # Populate with 0 if no valid data exists
+            data = np.zeros_like(data)
+
+        # Write the normalized data to each band of the new dataset
+        for band in range(1, 4):
+            rgb_ds.GetRasterBand(band).WriteArray(data)
+        rgb_ds.FlushCache()
+
+        # Read data as an RGB array (shape: 3 x height x width)
+        png_data = rgb_ds.ReadAsArray()
+        # Free resources
+        rgb_ds = None
+
+        # Left-rotate the array (shape: height x width x 3)
+        png_data = np.moveaxis(png_data, 0, -1)
+
+        # Prepare the new image and save (if required)
+        png_img = (img_as_float(png_data) * 255).astype(np.uint8)
+        if out_path is not None:
+            lock = __request_writelock__()
+            skio.imsave(out_path, png_img, check_contrast=False)
+            lock = __free_writelock__(lock)
+    except Exception as e:
+        if lock is not None:
+            lock = __free_writelock__(lock)
+        print(e, file=sys.stderr)
 
     return png_img
-
-
-def normalize_tiff(src_path, dest):
-    src_ds = open_geo_ds(src_path)
-
-    translate_opts = ["-ot", "Byte", "-co", "TILED=YES", "-a_nodata", "0", "-scale"]
-
-    # Translate and save the image
-    __request_writelock__()
-    dest_ds = gdal.Translate(str(dest), src_ds, options=" ".join(translate_opts))
-    __free_writelock__()
-
-    # Free the ds memory
-    src_ds = None
-    dest_ds = None
 
 
 def process_geotiff_to_png_conversion(
@@ -1109,13 +1130,7 @@ def process_geotiff_to_png_conversion(
     elif clear_dir:
         clear_directory(dest_dir)
 
-    def __exec__(idx, path):
-        ds = open_geo_ds(path)
-        for i in range(1, ds.RasterCount):
-            rb = ds.GetRasterBand(i)
-            rb.SetNoDataValue(0)
-        ds = None
-
+    def __exec__(path):
         if preserve_dir:
             relpath = path.relative_to(src_dir)
             dest_path = dest_dir / relpath.with_suffix(".png")
@@ -1123,21 +1138,15 @@ def process_geotiff_to_png_conversion(
             dest_path = dest_dir / f"{path.name}.png"
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-        norm_path = Path(f"/tmp/norm_{idx}.tif").resolve()
-        normalize_tiff(path, norm_path)
-        tiff_to_png(norm_path, dest_path)
+        _ = tiff_to_png(path, dest_path)
         file_map[path.stem] = {"tif": path, "png": dest_path}
-        return norm_path
 
     pbar = trange(len(src_paths), desc="Converting TIFF to PNG", leave=leave)
     with ThreadPoolExecutor(max_workers=get_cpu_count()) as executor:
-        futures = [
-            executor.submit(__exec__, i, path) for i, path in enumerate(src_paths)
-        ]
-        for future in as_completed(futures):
-            tmp_path = future.result()
-            tmp_path.unlink()
+        futures = [executor.submit(__exec__, path) for path in src_paths]
+        for _ in as_completed(futures):
             pbar.update()
+
     if leave:
         pbar.set_description("Complete")
     pbar.close()

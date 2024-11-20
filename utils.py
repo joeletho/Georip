@@ -10,6 +10,22 @@ def get_cpu_count():
     return cpu_count()
 
 
+class Lock:
+    def __init__(self):
+        self._locked = False
+
+    def is_locked(self):
+        return self._locked
+
+    def lock(self):
+        assert not self._locked and "Lock is already locked"
+        self._locked = True
+
+    def unlock(self):
+        assert self._locked and "Lock is already unlocked"
+        self._locked = False
+
+
 def pathify(path: str | Path, *args) -> Path | List[Path]:
     if not isinstance(path, list):
         paths = [path]
