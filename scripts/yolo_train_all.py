@@ -137,6 +137,11 @@ def int_or_str(x):
     except Exception:
         return str(x)
 
+def int_or_float(n):
+    if n.isdigit():
+        return int(n)
+    return float(n)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -151,7 +156,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("-e", "--epochs", type=int, default=300)
     parser.add_argument("-p", "--patience", type=int, default=100)
-    parser.add_argument("-b", "--batch", type=float, default=-1.0)
+    parser.add_argument("-b", "--batch", type=lambda n: int_or_float(n), default=-1.0)
     parser.add_argument("-z", "--imgsz", type=lambda x: int_or_str(x), default="parse")
     parser.add_argument("-m", "--model", type=str, required=True)
     parser.add_argument("-f", "--freeze", type=int, default=None)
