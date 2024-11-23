@@ -24,7 +24,7 @@ from skimage import img_as_float
 from tqdm.auto import tqdm, trange
 
 from .utils import (Lock, clear_directory, collect_files_with_suffix,
-                    get_cpu_count, linterp, pathify)
+                    get_cpu_count, pathify)
 
 TQDM_INTERVAL = 1 / 100
 
@@ -66,6 +66,16 @@ def save_as_shp(gdf: gpd.GeoDataFrame, path, exist_ok=False):
     gdf.to_file(path, driver="ESRI shapefile")
 
 
+def save_as_gpkg(gdf: gpd.GeoDataFrame, path, exist_ok=False):
+    path = pathify(path)
+    if not exist_ok and path.exists():
+        raise FileExistsError(path)
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    gdf.to_file(path, driver="GPKG")
+
+
 def save_as_csv(df: pd.DataFrame | gpd.GeoDataFrame, path, exist_ok=False):
     path = pathify(path)
     if not exist_ok and path.exists():
@@ -80,10 +90,10 @@ def load_shapefile(path) -> gpd.GeoDataFrame:
     if Path(path).suffix == ".csv":
         df = gpd.read_file(path)
         df["geometry"] = df["geometry"].apply(wkt.loads)
-        shp_df = gpd.GeoDataFrame(df)
+        gpkg_df = gpd.GeoDataFrame(df)
     else:
-        shp_df = gpd.read_file(path)
-    return shp_df
+        gpkg_df = gpd.read_file(path)
+    return gpkg_df
 
 
 def open_tif(path, *, masked=True):
@@ -128,15 +138,18 @@ def shapefile_to_csv(src_path, dest_path):
     print("Complete")
 
 
-def flatten_geom(gdf_src, id_column, geometry_column="geometry", leave=True):
+def flatten_geom(gdf_src, geometry_column="geometry", group_by=None, leave=True):
     geometry = []
     rows = []
 
-    total_updates = len(gdf_src.groupby(id_column)) + 1
+    df_group = gdf_src.groupby(group_by, sort=False)
+
+    total_updates = len(df_group) + 1
     updates = 0
     pbar = trange(total_updates, desc="Flattening geometry", leave=leave)
     start = time()
-    for _, group in gdf_src.groupby(id_column):
+
+    for _, group in df_group:
         polygon = shapely.unary_union(group.geometry)
         if isinstance(polygon, shapely.MultiPolygon):
             for i, poly in enumerate(polygon.geoms):
@@ -174,7 +187,7 @@ def map_metadata(
     img_dir,
     parse_filename=parse_filename,
     leave=True,
-) -> pd.DataFrame:
+) -> gpd.GeoDataFrame:
     img_dir = Path(img_dir).resolve()
     columns = {
         "start_year": [],
@@ -208,8 +221,8 @@ def map_metadata(
                 height = str(img.shape[1])
                 rows.append(
                     {
-                        "start_year": row[start_year_col],
-                        "end_year": row[end_year_col],
+                        "start_year": int(row[start_year_col]),
+                        "end_year": int(row[end_year_col]),
                         "filename": filename,
                         "path": path,
                         "width": width,
@@ -236,15 +249,16 @@ def map_metadata(
 
 
 def preprocess_shapefile(
-    shpfile, years, id_column, start_year_col, end_year_col, img_dir, leave=True
+    shpfile,
+    start_year_col,
+    end_year_col,
+    img_dir,
+    leave=True,
 ) -> gpd.GeoDataFrame:
     gdf = load_shapefile(shpfile)
     crs = gdf.crs
 
-    if years is not None:
-        gdf = gdf[(gdf[start_year_col] == years[0]) & (gdf[end_year_col] == years[1])]
-
-    gdf = flatten_geom(gdf, id_column=id_column, leave=leave)
+    gdf = flatten_geom(gdf, group_by=[start_year_col, end_year_col], leave=leave)
     gdf = gdf.drop_duplicates()
     gdf = map_metadata(
         gdf,
@@ -682,7 +696,32 @@ def preprocess_ndvi_difference_geotiffs(
         for _ in as_completed(futures):
             pbar.update()
 
-    gdf = map_geometry_to_geotiffs(gdf, output_dir)
+    # Group rows by the years in which they span. We want to ensure we are only
+    # applying geometry to rows which share the same start and end years.
+    year_pairs = gdf[[start_year_col, end_year_col]].drop_duplicates()
+    year_pairs = year_pairs.sort_values(by=[start_year_col, end_year_col])
+    start_years = [int(year) for year in year_pairs[start_year_col].tolist()]
+    end_years = [int(year) for year in year_pairs[end_year_col].tolist()]
+
+    mapped_gdfs = []
+    for start_year, end_year in zip(start_years, end_years):
+        # Get the rows which match the start and end years
+        target_years = gdf[
+            (gdf[start_year_col] == start_year) & (gdf[end_year_col] == end_year)
+        ]
+        gdf_mapped = map_geometry_to_geotiffs(
+            target_years,
+            output_dir,
+        )
+        # Insert the year columns into the mapped geodf
+        gdf_mapped.insert(0, start_year_col, start_year)
+        gdf_mapped.insert(1, end_year_col, end_year)
+
+        mapped_gdfs.append(gdf_mapped)
+
+    gdf = gpd.GeoDataFrame(pd.concat(mapped_gdfs, ignore_index=True), crs=gdf.crs)
+    gdf.set_geometry("geometry", inplace=True)
+
     pbar.update()
 
     chip_paths = [
@@ -714,7 +753,7 @@ def preprocess_ndvi_difference_geotiffs(
     )
     pbar.close()
 
-    gdf = gdf.drop_duplicates()
+    gdf = gdf.drop_duplicates().sort_values(by=[start_year_col, end_year_col])
     return gdf.reset_index(drop=True)
 
 
@@ -724,7 +763,6 @@ def make_ndvi_dataset(
     output_dir,
     *,
     years=None,
-    id_column="Subregion",
     start_year_col="start_year",
     end_year_col="end_year",
     geom_col="geometry",
@@ -734,6 +772,7 @@ def make_ndvi_dataset(
     exist_ok=False,
     save_csv=False,
     save_shp=False,
+    save_gpkg=False,
     ignore_empty_geom=True,
     tif_to_png=True,
     pbar_leave=True,
@@ -758,7 +797,7 @@ def make_ndvi_dataset(
 
     if save_csv:
         csv_dir.mkdir(parents=True, exist_ok=exist_ok)
-    if save_shp:
+    if save_shp or save_gpkg:
         shp_dir.mkdir(parents=True, exist_ok=exist_ok)
 
     chips_dir = output_dir / "images" / "chips"
@@ -776,8 +815,6 @@ def make_ndvi_dataset(
 
     gdf = preprocess_shapefile(
         shp_file,
-        years=years,
-        id_column=id_column,
         start_year_col=start_year_col,
         end_year_col=end_year_col,
         img_dir=ndvi_dir,
@@ -799,6 +836,11 @@ def make_ndvi_dataset(
         save_as_shp(
             gdf,
             shp_dir / output_fname.with_suffix(".shp"),
+        )
+    if save_gpkg:
+        save_as_gpkg(
+            gdf,
+            shp_dir / output_fname.with_suffix(".gpkg"),
         )
 
     pbar.update()
@@ -829,6 +871,11 @@ def make_ndvi_dataset(
                 gdf,
                 shp_dir / output_fname.with_suffix(".shp"),
             )
+        if save_gpkg:
+            save_as_gpkg(
+                gdf,
+                shp_dir / output_fname.with_suffix(".gpkg"),
+            )
 
     if xy_to_index:
         pbar.update()
@@ -846,6 +893,11 @@ def make_ndvi_dataset(
                 save_as_shp(
                     gdf,
                     shp_dir / output_fname.with_suffix(".shp"),
+                )
+            if save_gpkg:
+                save_as_gpkg(
+                    gdf,
+                    shp_dir / output_fname.with_suffix(".gpkg"),
                 )
     if tif_to_png:
         pbar.update()
@@ -871,6 +923,11 @@ def make_ndvi_dataset(
                 save_as_shp(
                     gdf,
                     shp_dir / output_fname.with_suffix(".shp"),
+                )
+            if save_gpkg:
+                save_as_gpkg(
+                    gdf,
+                    shp_dir / output_fname.with_suffix(".gpkg"),
                 )
     pbar.update()
     pbar.set_description("Creating NDVI dataset - Complete")
@@ -911,13 +968,28 @@ def map_geometry_to_geotiffs(
         "path",
         "width",
         "height",
-        "geometry",
     ]
     rows = []
     geometry = []
 
+    orig_stems = [
+        os.path.splitext(filename)[0] for filename in gdf["filename"].unique().tolist()
+    ]
+
+    def compare_stem(stem, names):
+        for name in names:
+            if stem[: len(name)] in name:
+                return True
+        return False
+
+    image_paths = [
+        path
+        for path in collect_files_with_suffix(".tif", img_dir, recurse=recurse)
+        if compare_stem(path.stem, orig_stems)
+    ]
+
     for path in tqdm(
-        collect_files_with_suffix(".tif", img_dir, recurse=recurse),
+        image_paths,
         desc="Mapping geometry to GeoTIFFs",
         leave=False,
     ):

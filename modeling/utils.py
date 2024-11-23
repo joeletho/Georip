@@ -16,6 +16,7 @@ import cv2
 import matplotlib.patches as patches
 import numpy as np
 import pandas as pd
+import PIL
 import rasterio
 import skimage
 import supervision as sv
@@ -32,7 +33,7 @@ from tqdm.auto import tqdm, trange
 
 from ftcnn.modeling.maskrcnn import collate_fn
 from ftcnn.utils import (Lock, clear_directory, collect_files_with_suffix,
-                         get_cpu_count)
+                         get_cpu_count, pathify)
 
 warnings.filterwarnings("ignore", "GeoSeries.notna", UserWarning)
 
@@ -1054,11 +1055,9 @@ class YOLODatasetLoader(torch.utils.data.Dataset):
             "iscrowd": iscrowd,
         }
 
-        print("Applying transform")
         # Apply transforms
         if self.transforms is not None:
             image, target = self.transforms(image, target)
-        print("Applied")
 
         return image, target
 
@@ -1998,6 +1997,127 @@ def display_image_and_annotations(
     plt.close()
 
 
+def display_ground_truth_and_predicted_images(
+    dataset,
+    idx,
+    predicted_images,
+    save_dir=None,
+    show=True,
+    include_background=False,
+    verbose=True,
+):
+    # Get the image and target from the dataset at index `idx`
+    gt_image, target = dataset[idx]
+    if len(target["masks"]) == 0 and not include_background:
+        return
+
+    gt_filepath = Path(dataset.image_paths[idx])
+    pred_filepath = None
+    for path in pathify(predicted_images):
+        if path.name == gt_filepath.name:
+            pred_filepath = path
+    if pred_filepath is None:
+        raise FileNotFoundError(f"Cannot find predicted image '{gt_filepath.name}'")
+
+    # Convert image to NumPy array
+    if isinstance(gt_image, torch.Tensor):
+        img_np = gt_image.permute(1, 2, 0).numpy()  # Convert [C, H, W] to [H, W, C]
+    else:
+        # If it's a PIL Image, convert to NumPy directly
+        img_np = np.array(gt_image)
+
+    pred_image = Image.open(pred_filepath)
+    pred_np = np.array(pred_image)
+
+    # Get image dimensions
+    height, width = img_np.shape[:2]
+
+    # Create a plot with two subplots for side-by-side comparison
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10))
+
+    # Set the title of the plot
+    fig.suptitle(gt_filepath.name)
+
+    # --- First subplot: Ground truth---
+    ax1.imshow(img_np)
+
+    # Get the bounding boxes (convert tensor to NumPy array)
+    boxes = target["boxes"].numpy()
+
+    # Get the labels (convert tensor to NumPy array)
+    labels = target["labels"].numpy()
+
+    # Get the class names from the dataset
+    class_names = dataset.classes
+
+    # Add bounding boxes and class names to the plot
+    for box, label in zip(boxes, labels):
+        x1, y1, x2, y2 = box
+        rect = patches.Rectangle(
+            (x1, y1), x2 - x1, y2 - y1, linewidth=2, edgecolor="red", facecolor="none"
+        )
+        ax1.add_patch(rect)
+
+        # Get the class name
+        class_name = class_names[label]
+
+        # Add class name text above the bounding box
+        ax1.text(
+            x1,
+            y1 - 10,  # Slightly above the bounding box
+            class_name,
+            fontsize=12,
+            color="red",
+            bbox=dict(facecolor="yellow", alpha=0.5, edgecolor="none", pad=2),
+        )
+
+    # Get the masks (ensure masks are tensors and convert to NumPy array)
+    masks = target["masks"].numpy()
+
+    # Overlay each mask on the image with transparency
+    for mask in masks:
+        ax1.imshow(np.ma.masked_where(mask == 0, mask), cmap="jet", alpha=0.5)
+
+    # Set titles and axis labels for the annotated image
+    ax1.set_title("Ground Truth")
+    ax1.set_xlabel(f"Width (pixels): {width}")
+    ax1.set_ylabel(f"Height (pixels): {height}")
+
+    # Add axis ticks
+    ax1.set_xticks(np.arange(0, width, max(1, width // 10)))
+    ax1.set_yticks(np.arange(0, height, max(1, height // 10)))
+
+    # Hide axis lines for both images
+    ax1.axis("off")
+
+    # --- Second subplot: Predicted image---
+    ax2.imshow(pred_np)
+    ax2.set_title("Predicted")
+    ax2.axis("off")
+
+    # Save the figure containing both subplots (side-by-side comparison)
+    plt.tight_layout()
+
+    if save_dir:
+        save_dir = Path(save_dir).resolve()
+        if not save_dir.exists():
+            save_dir.mkdir(parents=True)
+
+        save_filepath = save_dir / f"{gt_filepath.stem}_sbs.png"
+
+        plt.savefig(save_filepath)
+
+        if verbose:
+            print(f"Image {save_filepath.name} saved to {save_dir}")
+
+    if show:
+        # Show the side-by-side images (optional)
+        plt.show()
+
+    # Close the plot to free memory
+    plt.close()
+
+
 def maskrcnn_get_transform(
     train: bool,
     imgsz=None,
@@ -2024,3 +2144,26 @@ def maskrcnn_get_transform(
     transforms.append(T.ToDtype(torch.float, scale=True))
     transforms.append(T.ToPureTensor())
     return T.Compose(transforms)
+
+
+def plot_paired_images(paired_images, nrows=1, ncols=2, figsize=(15, 15)):
+    assert ncols % 2 == 0, "Number of columns must be a multiple of 2"
+    assert (
+        len(paired_images) >= nrows * ncols
+    ), "Number of pairs is less than the dimensions given"
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
+    count = 0
+    for row in range(nrows):
+        for col in range(ncols):
+            if col % 2 == 0:
+                axes[row][col].set_title(f"{count}: Ground Truth")
+            else:
+                axes[row][col].set_title(f"{count}: Predicted")
+
+            axes[row][col].imshow(paired_images[count][col % 2])
+            axes[row][col].axis("off")
+            count += 1
+
+    plt.tight_layout()
+    plt.show()

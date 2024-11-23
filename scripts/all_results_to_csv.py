@@ -159,6 +159,7 @@ def parse_metrics(path):
 
 def parse_stats(path):
     data = {
+        "project_name": [],
         "treatment": [],
         "start_year": [],
         "end_year": [],
@@ -190,13 +191,18 @@ def parse_stats(path):
         match (key):
             case "project":
                 last_slash = val.rfind("/")
-                parts = val[last_slash:].split("_")
+                project_name = val[last_slash:].strip('/')
+                parts = project_name.split("_")
                 n_fields = len(parts)
                 if not (9 <= n_fields <= 10):
                     print(parts)
                     raise ValueError(
                         f"Error parsing project in '{path.name}': unrecognized format on line {i}"
                     )
+
+                data["project_name"].append(project_name)
+
+                # Parse parts
                 """
                 [1]: 'treatment=TYPE'
                 [2]: 'years=STARTtoEND'
@@ -209,13 +215,21 @@ def parse_stats(path):
                 """
                 data["treatment"].append(parts[1].split("=")[1])
 
-                years = parts[2].split("=")[1].split("to")
-                if len(years) != 2:
-                    raise ValueError(
-                        f"Error parsing project in '{path.name}': unrecognized 'years' format on line {i}"
-                    )
-                data["start_year"].append(int(years[0]))
-                data["end_year"].append(int(years[1]))
+                years = parts[2].split("=")[1]
+                if years == "None":
+                    years = ["None", "None"]
+                else:
+                    years = years.split("to")
+                    if len(years) != 2:
+                        raise ValueError(
+                            f"Error parsing project in '{path.name}': unrecognized 'years' format on line {i}"
+                        )
+                data["start_year"].append(
+                    int(years[0]) if years[0].isnumeric() else years[0]
+                )
+                data["end_year"].append(
+                    int(years[1]) if years[1].isnumeric() else years[1]
+                )
 
                 data["imgsz"].append(int(parts[3].split("=")[1]))
                 data["split"].append(int(parts[4].split("=")[1]) / 100)
@@ -315,7 +329,7 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output_file", type=str, required=True)
     parser.add_argument("-r", "--recursive", default=False, action="store_true")
     parser.add_argument("-m", "--mode", type=str, default="w")
-    parser.add_argument("-l", "--levels", type=int, default=1)
+    parser.add_argument("-l", "--levels", type=int, default=0)
     parser.add_argument(
         "-s",
         "--sort_by",
@@ -342,16 +356,13 @@ if __name__ == "__main__":
 
     if not args.recursive:
         print(f"Mode is {args.mode}")
-        exec_program(Path(os.getcwd()), args)
+        exec_program(args.directory, args)
     else:
         args.mode = "a+"
 
-        level = args.levels - 2
+        level = args.levels
         dir_queue = []
-        for dir in args.directory.iterdir():
-            if dir.is_file():
-                continue
-            collect_dirs(dir_queue, dir, level)
+        collect_dirs(dir_queue, args.directory, level)
 
         print(f"Total of {len(dir_queue)} directories")
         for dir in dir_queue:

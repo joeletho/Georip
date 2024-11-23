@@ -11,15 +11,17 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import rasterio
+import skimage.io as io
 from matplotlib import pyplot as plt
 from pandas.compat import sys
 from shapely import MultiPolygon, Polygon, normalize, unary_union
 from tqdm.auto import tqdm, trange
 
 from ftcnn.ftcnn import (chip_geotiff_and_convert_to_png, clear_directory,
-                         encode_classes, encode_default_classes, get_cpu_count,
-                         make_ndvi_dataset, save_as_csv, save_as_shp,
-                         stringify_points)
+                         collect_files_with_suffix, encode_classes,
+                         encode_default_classes, get_cpu_count,
+                         make_ndvi_dataset, save_as_csv, save_as_gpkg,
+                         save_as_shp, stringify_points)
 
 from .types import BBox, XYInt, YOLODataset
 from .utils import extract_annotated_label_and_image_data, write_classes
@@ -27,6 +29,7 @@ from .utils import extract_annotated_label_and_image_data, write_classes
 warnings.filterwarnings("ignore", "GeoSeries.notna", UserWarning)
 
 TQDM_INTERVAL = 1 / 100
+
 
 def plot_yolo_results(
     results, *, shape: XYInt | None = None, figsize: XYInt | None = None
@@ -367,8 +370,12 @@ def predict_on_image_stream(model, *, images, conf=0.6, **kwargs):
             yield None
 
 
-def predict_on_image(model, image, conf=0.6):
-    result = model(image, conf=conf)[0]
+def predict_on_image(model, image, conf=0.6, **kwargs):
+    result = model.predict(
+        image,
+        conf=conf,
+        **kwargs,
+    )[0]
     return get_result_stats(result)
 
 
@@ -385,11 +392,6 @@ def get_result_stats(result):
         masks = result.masks.data.cpu().numpy()  # masks, (N, H, W)
 
     return result, (boxes, masks, classes, probs)
-
-
-def get_input_size(model):
-    info = model.named_parameters()
-    return list(info)[0][1].shape[0]
 
 
 def mask_to_polygon(mask):
@@ -574,7 +576,6 @@ def ndvi_to_yolo_dataset(
     output_dir,
     *,
     years=None,
-    id_column="Subregion",
     start_year_col="start_year",
     end_year_col="end_year",
     geom_col="geometry",
@@ -585,6 +586,7 @@ def ndvi_to_yolo_dataset(
     exist_ok=False,
     save_csv=False,
     save_shp=False,
+    save_gpkg=False,
     ignore_empty_geom=True,
     generate_labels=True,
     tif_to_png=True,
@@ -606,7 +608,6 @@ def ndvi_to_yolo_dataset(
         ndvi_dir,
         output_dir,
         years=years,
-        id_column=id_column,
         start_year_col=start_year_col,
         end_year_col=end_year_col,
         geom_col=geom_col,
@@ -616,6 +617,7 @@ def ndvi_to_yolo_dataset(
         exist_ok=exist_ok,
         save_csv=save_csv,
         save_shp=save_shp,
+        save_gpkg=False,
         ignore_empty_geom=ignore_empty_geom,
         tif_to_png=tif_to_png,
         pbar_leave=False,
@@ -658,6 +660,11 @@ def ndvi_to_yolo_dataset(
             save_as_shp(
                 gdf,
                 shp_dir / output_fname.with_suffix(".shp"),
+            )
+        if save_gpkg:
+            save_as_gpkg(
+                gdf,
+                shp_dir / output_fname.with_suffix(".gpkg"),
             )
     pbar.update()
 
@@ -748,3 +755,104 @@ def to_yolo(gdf: gpd.GeoDataFrame, compile=True) -> YOLODataset:
             os.remove(tmp_path)
         raise e
     return ds
+
+
+def draw_yolo_bboxes(image_path, label_path, class_names=None):
+    # Load the image using OpenCV
+    img = cv2.imread(image_path)
+    img_height, img_width = img.shape[:2]
+
+    # Read the YOLO-formatted label file
+    with open(label_path, "r") as f:
+        bboxes = f.readlines()
+
+    # Loop through each line (bounding box) in the label file
+    for bbox in bboxes:
+        bbox = bbox.strip().split()
+
+        class_id = int(bbox[0])  # Class ID is the first value
+        x_center = float(bbox[1])  # YOLO X center (relative to image width)
+        y_center = float(bbox[2])  # YOLO Y center (relative to image height)
+        bbox_width = float(bbox[3])  # YOLO width (relative to image width)
+        bbox_height = float(bbox[4])  # YOLO height (relative to image height)
+
+        # Convert YOLO coordinates back to absolute pixel values
+        x_center_abs = int(x_center * img_width)
+        y_center_abs = int(y_center * img_height)
+        bbox_width_abs = int(bbox_width * img_width)
+        bbox_height_abs = int(bbox_height * img_height)
+
+        # Calculate the top-left corner of the bounding box
+        x_min = int(x_center_abs - (bbox_width_abs / 2))
+        y_min = int(y_center_abs - (bbox_height_abs / 2))
+        x_max = int(x_center_abs + (bbox_width_abs / 2))
+        y_max = int(y_center_abs + (bbox_height_abs / 2))
+
+        # Draw the bounding box on the image
+        color = (0, 255, 0)  # Bounding box color (green)
+        thickness = 2  # Thickness of the box
+        img = cv2.rectangle(img, (x_min, y_min), (x_max, y_max), color, thickness)
+
+        # Optionally, label the bounding box with the class name
+        if class_names:
+            label = class_names[class_id]
+            cv2.putText(
+                img, label, (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2
+            )
+
+    # Convert the image back to RGB for display with matplotlib
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return img_rgb
+
+
+def yolo_create_truth_and_prediction_pairs(
+    truth_images_dir, truth_labels_dir, pred_images_dir
+):
+    truth_image_paths = collect_files_with_suffix([".jpg", ".png"], truth_images_dir)
+    truth_label_paths = collect_files_with_suffix(".txt", truth_labels_dir)
+    pred_image_paths = collect_files_with_suffix([".jpg", ".png"], pred_images_dir)
+
+    assert (
+        len(truth_image_paths) == len(truth_label_paths)
+        and "Number of Images and labels must match"
+    )
+    assert (
+        len(truth_image_paths) == len(pred_image_paths)
+        and "Number of truth images must match predicted images"
+    )
+
+    # Align image and label paths
+    for i in range(len(truth_image_paths)):
+        found = False
+        for j, label in enumerate(truth_label_paths):
+            if truth_image_paths[i].stem == label.stem:
+                truth_label_paths[i], truth_label_paths[j] = (
+                    truth_label_paths[j],
+                    truth_label_paths[i],
+                )
+                found = True
+                break
+        if not found:
+            raise FileNotFoundError(
+                f"Could not find label for {truth_image_paths[i].name}"
+            )
+
+    # Create truth-bounded images and add it and its predicted counterpart to the list of images
+    images = []
+    for i in range(len(truth_image_paths)):
+        found = False
+        for pred_path in pred_image_paths:
+            if truth_image_paths[i].stem == pred_path.stem:
+                truth_image = draw_yolo_bboxes(
+                    truth_image_paths[i], truth_label_paths[i]
+                )
+                pred_image = io.imread(pred_path)
+                images.append((truth_image, pred_image))
+                found = True
+                break
+        if not found:
+            raise FileNotFoundError(
+                f"Could not find {truth_image_paths[i].name} in predicted images"
+            )
+
+    return images
