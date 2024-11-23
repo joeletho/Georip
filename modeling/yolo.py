@@ -406,16 +406,30 @@ def mask_to_polygon(mask):
     return polygons
 
 
+def parse_subregion_and_years_from_path(image_path):
+    parts = Path(image_path).stem.split("_")
+    subregion = parts[0]
+    years = parts[1]
+    if "extended" in years.lower():
+        subregion = subregion + "E"
+        years = parts[2]
+    elif subregion[-2:].isnumeric():
+        start = 0
+        while start < len(subregion) and not subregion[start].isdigit():
+            start += 1
+        if start >= len(subregion):
+            raise ValueError(f"Error parsing years from {image_path}")
+        years = subregion[start:]
+        subregion = subregion[:start]
+    years = years.split("to")
+    return subregion, (int(years[0]), int(years[1]))
+
+
 def predict_geotiff(model, geotiff_path, confidence, chip_size, imgsz, **kwargs):
     chips, epsg_code = chip_geotiff_and_convert_to_png(
         geotiff_path, chip_size=chip_size
     )
     results = []
-
-    # Filter out the indices returned along with the chips
-    # chips = [chip for chip, _ in chips]
-    # for chip in chips:
-    # print(chip.dtype, chip.shape)
 
     pbar = tqdm(total=len(chips), desc="Detections 0", leave=False)
     for result in predict_on_image_stream(
@@ -429,6 +443,9 @@ def predict_geotiff(model, geotiff_path, confidence, chip_size, imgsz, **kwargs)
     pbar.close()
 
     columns = [
+        "subregion",
+        "start_year",
+        "end_year",
         "path",
         "class_id",
         "class_name",
@@ -440,6 +457,8 @@ def predict_geotiff(model, geotiff_path, confidence, chip_size, imgsz, **kwargs)
     ]
     rows = []
     geometry = []
+
+    subregion, years = parse_subregion_and_years_from_path(geotiff_path)
 
     with rasterio.open(geotiff_path) as src:
         for (result, data), coords in results:
@@ -469,6 +488,9 @@ def predict_geotiff(model, geotiff_path, confidence, chip_size, imgsz, **kwargs)
                         )
                         rows.append(
                             {
+                                "subregion": subregion,
+                                "start_year": years[0],
+                                "end_year": years[1],
                                 "path": geotiff_path,
                                 "class_id": int(class_id),
                                 "class_name": class_name,
@@ -571,7 +593,10 @@ def predict_geotiffs(
                     if index == -1:
                         gdfs.append(_gdf)
                     else:
-                        gdfs[index] = pd.concat([gdfs[index], _gdf], ignore_index=True)
+                        gdfs[index] = gpd.GeoDataFrame(
+                            pd.concat([gdfs[index], _gdf], ignore_index=True),
+                            crs=_gdf.crs,
+                        )
             pbar.update()
     pbar.close()
 
