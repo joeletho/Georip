@@ -2014,7 +2014,7 @@ def display_ground_truth_and_predicted_images(
     gt_filepath = Path(dataset.image_paths[idx])
     pred_filepath = None
     for path in pathify(predicted_images):
-        if path.name == gt_filepath.name:
+        if path.stem == gt_filepath.stem:
             pred_filepath = path
     if pred_filepath is None:
         raise FileNotFoundError(f"Cannot find predicted image '{gt_filepath.name}'")
