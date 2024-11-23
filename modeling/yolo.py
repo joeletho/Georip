@@ -357,7 +357,10 @@ def predict_on_image_stream(model, *, images, conf=0.6, **kwargs):
     for i in range(0, len(images) - 1, batch_size):
         try:
             results = model.predict(
-                source=[image[0] for image in images[i : i + batch_size]],
+                source=[
+                    np.ascontiguousarray(image[0])
+                    for image in images[i : i + batch_size]
+                ],
                 conf=conf,
                 stream=True,
                 verbose=False,
@@ -408,6 +411,11 @@ def predict_geotiff(model, geotiff_path, confidence, chip_size, imgsz, **kwargs)
         geotiff_path, chip_size=chip_size
     )
     results = []
+
+    # Filter out the indices returned along with the chips
+    # chips = [chip for chip, _ in chips]
+    # for chip in chips:
+    # print(chip.dtype, chip.shape)
 
     pbar = tqdm(total=len(chips), desc="Detections 0", leave=False)
     for result in predict_on_image_stream(
