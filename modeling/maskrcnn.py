@@ -28,6 +28,15 @@ from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as F
 from torchvision.transforms import transforms as T
+from shapely import MultiPolygon, Polygon, normalize, unary_union
+from tqdm.auto import tqdm, trange
+import cv2
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import rasterio
+import pandas as pd
+import geopandas as gpd
+
+from ftcnn.ftcnn import (chip_geotiff_and_convert_to_png,get_cpu_count)
 
 
 def mrcnn_load_model(num_classes, path, *, device):
@@ -1670,3 +1679,259 @@ def coco_evaluate(imgs):
     return imgs.params.imgIds, np.asarray(imgs.evalImgs).reshape(
         -1, len(imgs.params.areaRng), len(imgs.params.imgIds)
     )
+
+
+
+def predict_on_image_stream_maskrcnn(model, *, images, conf=0.6, device='cpu', **kwargs):
+
+    print("Running Predict on image stream")
+    
+    batch_size = kwargs.get("batch_size")
+    if batch_size is None:
+        num_workers = kwargs.get("num_workers")
+        batch_size = num_workers if num_workers is not None else get_cpu_count()
+    else:
+        kwargs.pop("batch_size")
+
+    print(f"Processing {len(images)} images with batch size {batch_size}")
+
+    
+    model.to(device)
+    model.eval()
+
+    for i in range(0, len(images), batch_size):
+        try:
+    
+            # Prepare the batch of images
+            batch_images = []
+            for idx, image in enumerate(images[i : i + batch_size]):
+                print(f"Processing image {i + idx + 1}/{len(images)}")
+                tensor_image = F.to_tensor(image[0]).to(device)
+                print(f"Image {i + idx + 1} converted to tensor with shape: {tensor_image.shape}")
+                batch_images.append(tensor_image)
+
+            
+            
+
+            # Perform predictions
+            with torch.no_grad():
+                results = model(batch_images)
+                print(f"Model predictions completed for batch {i // batch_size + 1}.")
+
+            # Yield results using `get_result_stats_maskrcnn`
+            for j, result in enumerate(results):
+                result_stats = get_result_stats_maskrcnn(result, conf=conf)
+                yield result_stats, images[i + j][1]
+        except Exception as e:
+            print(f"Error processing batch {i // batch_size + 1}: {e}", file=sys.stderr)
+            yield None
+
+def get_result_stats_maskrcnn(result,conf=0.6):
+    # Detection
+    boxes = result.get("boxes", None).cpu().numpy() if "boxes" in result else None
+    labels = result.get("labels", None).cpu().numpy() if "labels" in result else None
+    scores = result.get("scores", None).cpu().numpy() if "scores" in result else None
+    masks = result.get("masks", None).cpu().numpy() if "masks" in result else None
+
+    # Apply confidence threshold
+    if scores is not None:
+        filtered_indices = scores >= conf
+        boxes = boxes[filtered_indices] if boxes is not None else None
+        labels = labels[filtered_indices] if labels is not None else None
+        probs = scores[filtered_indices] if scores is not None else None
+        masks = masks[filtered_indices] if masks is not None else None
+
+    # Organize the results into a structured dictionary
+    return result, (boxes,masks,labels,probs)
+
+def mask_to_polygon_maskrcnn(mask):
+
+    mask = mask>0.5
+    mask = (mask * 255).astype(np.uint8).squeeze()  
+    contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
+    polygons = [Polygon(c.reshape(-1, 2)) for c in contours if len(c) >= 3]
+
+    return polygons
+
+
+def predict_geotiff_maskrcnn(model, geotiff_path, confidence, chip_size, imgsz, **kwargs):
+    chips, epsg_code = chip_geotiff_and_convert_to_png(
+        geotiff_path, chip_size=chip_size
+    )
+    results = []
+
+    
+    pbar = tqdm(total=len(chips), desc="Detections 0", leave=False)
+    for result in predict_on_image_stream_maskrcnn(
+        model, imgsz=imgsz, images=chips, conf=confidence, **kwargs
+    ):
+        
+        if result is not None and result[0][1][1] is not None:
+            
+            results.append(result)
+            pbar.set_description(f"Detections {len(results)}")
+        else:
+            print("Result is None or does not contain valid masks.")
+        pbar.update()
+    pbar.update()
+    pbar.close()
+
+    columns = [
+        "path",
+        "class_id",
+        "class_name",
+        "bbox_x",
+        "bbox_y",
+        "bbox_w",
+        "bbox_h",
+        "geometry",
+    ]
+    rows = []
+    geometry = []
+
+    with rasterio.open(geotiff_path) as src:
+        for (result, data), coords in results:
+            row, col = src.index(*coords)
+
+          
+            for mask in data[1]: 
+                try:
+                    polygons = mask_to_polygon_maskrcnn(mask)
+        
+                    class_id = data[2][0]
+                   
+                    names = ["background", "treatment"]
+                    class_name = names[class_id]
+                    print(f"Detected class: {class_name} (ID: {class_id})")
+                    for bbox in data[0]:
+                        bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax = (
+                            bbox[0],
+                            bbox[1],
+                            bbox[2],
+                            bbox[3],
+                        )
+                        bbox_y, bbox_x = src.xy(row + bbox_ymin, col + bbox_xmin)
+                        bbox_yy, bbox_xx = src.xy(row + bbox_ymax, col + bbox_xmax)
+                        bbox_w = bbox_xx - bbox_x
+                        bbox_h = bbox_yy - bbox_y
+                        bbox_w = abs(bbox_w)
+                        bbox_h = abs(bbox_h)
+                        print(f"Bounding box: x={bbox_x}, y={bbox_y}, w={bbox_w}, h={bbox_h}")
+
+                        for unioned_geometry in polygons:
+                            unioned_geometry = Polygon(
+                                [
+                                    src.xy(row + y, col + x)
+                                    for x, y in unioned_geometry.exterior.coords
+                                ]
+                            )
+                            rows.append(
+                                {
+                                    "path": geotiff_path,
+                                    "class_id": int(class_id),
+                                    "class_name": class_name,
+                                    "bbox_x": bbox_x,
+                                    "bbox_y": bbox_y,
+                                    "bbox_w": bbox_w,
+                                    "bbox_h": bbox_h,
+                                }
+                            )
+                            print("appending to geometry")
+                            geometry.append(unioned_geometry.buffer(0))
+                except Exception as e:
+                    print(f"Error processing MASK {e}", file=sys.stderr)
+    print("Creating GeoDataFrame...")
+    gdf = gpd.GeoDataFrame(
+        rows, columns=columns, geometry=geometry, crs=f"EPSG:{epsg_code}"
+    )
+    print(f"GeoDataFrame created with {len(gdf)} rows.")
+
+    if gdf.empty:
+        print("gdf empty")
+        return results, gdf
+
+    print("Unionizing all intersecting polygons...")
+    unioned_geometry = unary_union(gdf["geometry"])
+
+    distinct_geometries = []
+    if isinstance(unioned_geometry, MultiPolygon):
+        for poly in unioned_geometry.geoms:
+            poly = normalize(poly)
+            distinct_geometries.append(poly)
+    else:
+        unioned_geometry = normalize(unioned_geometry)
+        geometry.append(unioned_geometry)
+    print(f"Generated {len(distinct_geometries)} distinct geometries.")
+
+
+    rows = []
+    geometry = []
+    for geom in distinct_geometries:
+        # Find rows in the original gdf that match this unionized geometry
+        matching_rows = gdf[
+            gdf["geometry"].intersects(geom)
+        ]  # Find all original rows that intersect this new geometry
+
+        # Add a new row for the unioned geometry, keeping other relevant information from the first matching row
+        if not matching_rows.empty:
+            row_to_keep = matching_rows.iloc[
+                0
+            ].copy()  # Copy the first matching row to keep its other fields
+            # Update the geometry to the unionized one
+            rows.append(row_to_keep)
+            geometry.append(geom)
+    gdf_unionized = gpd.GeoDataFrame(
+        rows, columns=columns, geometry=geometry, crs=gdf.crs
+    )
+    print(f"Unionized GeoDataFrame created with {len(gdf_unionized)} rows.")
+    print("gdf not empty returning results from geotiff")
+    print(len(results))
+    print(len(gdf_unionized))
+    return results, gdf_unionized
+
+def predict_geotiffs_maskrcnn(
+    model, geotiff_paths, *, confidence, chip_size, imgsz, max_images=2, **kwargs
+):
+    results = []
+    gdfs = []
+
+    def get_index_with_crs(gdf):
+        for i, g in enumerate(gdfs):
+            if g.crs == gdf.crs:
+                return i
+        return -1
+
+    pbar = trange(len(geotiff_paths), desc="Processing predictions", leave=False)
+
+    with ThreadPoolExecutor(max_workers=max_images) as executor:
+        futures = [
+            executor.submit(
+                predict_geotiff_maskrcnn,
+                model,
+                path,
+                confidence,
+                chip_size=chip_size,
+                imgsz=imgsz,
+                **kwargs,
+            )
+            for path in geotiff_paths
+        ]
+        for future in as_completed(futures):
+            if future.exception() is not None:
+                print(future.exception(), file=sys.stderr)
+            else:
+                result, _gdf = future.result()
+                results.append(result)
+                if len(gdfs) == 0:
+                    gdfs.append(_gdf)
+                elif not _gdf.empty:
+                    index = get_index_with_crs(_gdf)
+                    if index == -1:
+                        gdfs.append(_gdf)
+                    else:
+                        gdfs[index] = pd.concat([gdfs[index], _gdf], ignore_index=True)
+            pbar.update()
+    pbar.close()
+
+    print("gdf not empty returning results from geotiffs")
+    return results, gdfs
