@@ -1,4 +1,4 @@
-name: ssu-ai
+name: ftcnn
 channels:
   - conda-forge
   - defaults
