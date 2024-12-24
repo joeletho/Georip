@@ -1,4 +1,4 @@
-# FTCNN - Forest Treatment Convolutional Neural Network for Geospatial Data
+# FTCNN - Forest Treatment Convolutional Neural Network Tools for Geospatial Data
 
 FTCNN is a repository designed for processing geospatial and raster data, specifically for forest treatment (FT) purposes, to be used in convolutional neural networks (CNNs). This project focuses on raster manipulation, allowing users to create datasets from geospatial data (such as satellite images or aerial imagery) that can be used for CNN-based image classification. The repository provides Jupyter notebooks for dataset creation, model prediction, and visualization of results, with an emphasis on forest management and environmental monitoring applications.
 
