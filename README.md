@@ -59,6 +59,8 @@ Once activated, you can start using the provided Jupyter notebooks for dataset c
 
 ### Dataset Creation
 
+[Create a single dataset](https://github.com/joeletho/FTCNN/blob/main/notebooks/yolo_create_single_dataset.ipynb), or [create multiple datasets](https://github.com/joeletho/FTCNN/blob/main/notebooks/yolo_create_multiple_datasets.ipynb) with different configurations (useful for testing dataset performance and bias).
+
 The dataset creation process involves manipulating geospatial raster data to create labeled datasets for training CNNs. The provided notebooks guide you through tasks like:
 
 - Loading geospatial raster data (e.g., satellite imagery or other forest-related raster datasets).
@@ -66,7 +68,13 @@ The dataset creation process involves manipulating geospatial raster data to cre
 - Labeling data based on forest treatment categories, either manually or through automated methods.
 - Augmenting the dataset by applying transformations such as rotation, flipping, and scaling to improve model robustness.
 
+### Train Models
+
+FTCNN integrates both [Ultralytics YOLO](https://docs.ultralytics.com/) and [MaskRCNN](https://github.com/matterport/Mask_RCNN) models with tools for dataset creation, training, and more.
+
 ### Prediction
+
+Easily [predict on multiple](https://github.com/joeletho/FTCNN/blob/main/notebooks/yolo_predict_multiple_datasets.ipynb) validation by storing or linking the dataset folders in a single directory. This may be useful when developing a dataset for your model(s). [Create multiple datasets](https://github.com/joeletho/FTCNN/blob/main/notebooks/yolo_create_multiple_datasets.ipynb) with different configurations (train/val/test splits, image sizes, etc.) and then immediately run predictions to obtain performance metrics.
 
 After training the CNN model, you can use the prediction notebook to classify new geospatial raster data. This notebook allows you to:
 
@@ -75,6 +83,8 @@ After training the CNN model, you can use the prediction notebook to classify ne
 - Visualize the predictions overlaid on the original images to assess accuracy and identify areas of interest.
 
 ### Viewing Images and Labels
+
+[View datasets](https://github.com/joeletho/FTCNN/blob/main/notebooks/yolo_dataview.ipynb) or a subset, as a pair of images and/or annotations. This is especially useful to visually validate your data (i.e. all image operations are sound and annotation pixels map to the correct pixels), so that when you start training, you can be assured the data is correct.
 
 To view images and their associated labels, open the relevant notebook in the notebooks/ folder. These notebooks provide a way to:
 
