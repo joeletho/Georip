@@ -31,9 +31,8 @@ from tqdm.auto import tqdm, trange
 
 from ftcnn.io import clear_directory, collect_files_with_suffix, pathify
 from ftcnn.modeling.maskrcnn import collate_fn
-<<<<<<< Updated upstream:ftcnn/modeling/utils.py
 from ftcnn.utils import NUM_CPU, TQDM_INTERVAL, Lock
-=======
+
 from ftcnn.utils import (Lock, clear_directory, collect_files_with_suffix,
                          get_cpu_count, pathify)
 
@@ -46,7 +45,7 @@ from shapely.ops import unary_union
 warnings.filterwarnings("ignore", "GeoSeries.notna", UserWarning)
 
 TQDM_INTERVAL = 1 / 100
->>>>>>> Stashed changes:modeling/utils.py
+
 
 XYPair = tuple[float | int, float | int]
 XYInt = tuple[int, int]
