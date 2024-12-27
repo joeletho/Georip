@@ -4,7 +4,7 @@ import shutil
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from time import sleep, time
+from time import sleep
 
 import cv2
 import geopandas as gpd
@@ -17,23 +17,38 @@ from pandas.compat import sys
 from shapely import MultiPolygon, Polygon, normalize, unary_union
 from tqdm.auto import tqdm, trange
 
-from ftcnn.ftcnn import (chip_geotiff_and_convert_to_png, clear_directory,
-                         collect_files_with_suffix, encode_classes,
-                         encode_default_classes, get_cpu_count,
-                         make_ndvi_dataset, save_as_csv, save_as_gpkg,
-                         save_as_shp, stringify_points)
+from ftcnn.datasets.tools import make_ndvi_difference_dataset
+from ftcnn.geometry import stringify_points
+from ftcnn.geospacial.utils import encode_classes, encode_default_classes
+from ftcnn.io import (clear_directory, collect_files_with_suffix, save_as_csv,
+                      save_as_gpkg, save_as_shp)
+from ftcnn.raster.tools import tile_raster_and_convert_to_png
+from ftcnn.utils import NUM_CPU
 
-from .types import BBox, XYInt, YOLODataset
-from .utils import extract_annotated_label_and_image_data, write_classes
-
-warnings.filterwarnings("ignore", "GeoSeries.notna", UserWarning)
-
-TQDM_INTERVAL = 1 / 100
+from .utils import (BBox, XYInt, YOLODataset,
+                    extract_annotated_label_and_image_data, write_classes)
 
 
 def plot_yolo_results(
     results, *, shape: XYInt | None = None, figsize: XYInt | None = None
 ):
+    """
+    Plots YOLO results in a grid layout.
+
+    Parameters:
+        results: List[YOLOResult]
+            A list of YOLO result objects containing image and detection data to be plotted.
+        shape: Tuple[int, int], optional
+            The shape (rows, columns) of the plot grid. Defaults to (1, len(results)).
+        figsize: Tuple[int, int], optional
+            The size of the figure in inches (width, height). Defaults to None.
+
+    Returns:
+        None
+
+    Raises:
+        Exception: If the number of results exceeds the grid shape.
+    """
     if shape is None:
         shape = (1, len(results))
 
@@ -57,6 +72,25 @@ def plot_yolo_results(
 
 
 def yolo_make_dataset(labels_path, images_path, class_map, root_dir):
+    """
+    Prepares a YOLO dataset by copying relevant labels and images into a structured directory.
+
+    Parameters:
+        labels_path: PathLike
+            Path to the directory containing label files.
+        images_path: PathLike
+            Path to the directory containing image files.
+        class_map: Dict[int, str]
+            Mapping of class IDs to class names.
+        root_dir: PathLike
+            Path to the root directory where the YOLO dataset will be created.
+
+    Returns:
+        None
+
+    Raises:
+        Exception: If copying labels and images fails.
+    """
     root_dir = Path(root_dir).resolve()
     labels_dir = root_dir / "labels"
     images_dir = root_dir / "images"
@@ -98,6 +132,28 @@ def yolo_make_dataset(labels_path, images_path, class_map, root_dir):
 def yolo_get_labels_and_images(
     label_paths, image_paths, class_map, *, num_workers=None, from_format="yolo"
 ):
+    """
+    Retrieves labels and images associated with specified classes.
+
+    Parameters:
+        label_paths: PathLike
+            Directory containing label files.
+        image_paths: PathLike
+            Directory containing image files.
+        class_map: Dict[int, str]
+            Mapping of class IDs to class names.
+        num_workers: int, optional
+            Number of worker threads to use. Defaults to the number of CPUs.
+        from_format: str, optional
+            Format of the label files ("yolo" by default).
+
+    Returns:
+        Tuple[List[Labels], List[Images]]
+            Lists of labels and images.
+
+    Raises:
+        Exception: If label and image paths do not align or if any label fails to load.
+    """
     labels = []
     images = []
 
@@ -155,7 +211,7 @@ def yolo_get_labels_and_images(
 
     label_paths, image_paths = __preprocess_paths__(label_paths, image_paths)
     if num_workers is None:
-        num_workers = get_cpu_count()
+        num_workers = NUM_CPU
     batch = len(label_paths) // num_workers
 
     pbar = trange(num_workers, desc="Progress")
@@ -185,6 +241,25 @@ def yolo_get_labels_and_images(
 def yolo_copy_labels_and_images_containing_class(
     class_id, *, src_labels_dir, src_images_dir, dest_dir
 ):
+    """
+    Copies labels and images containing a specific class to a destination directory.
+
+    Parameters:
+        class_id: str
+            The class ID to filter and copy.
+        src_labels_dir: PathLike
+            Source directory containing label files.
+        src_images_dir: PathLike
+            Source directory containing image files.
+        dest_dir: PathLike
+            Destination directory to store filtered labels and images.
+
+    Returns:
+        None
+
+    Raises:
+        IOError: If copying files fails.
+    """
     label_paths = []
     image_paths = []
     labels_dest = Path(dest_dir, "labels").resolve()
@@ -223,6 +298,18 @@ def yolo_copy_labels_and_images_containing_class(
 
 
 def yolo_remove_annotations_not_in(class_ids, *, labels_dir):
+    """
+    Removes annotations in label files that do not match specified class IDs.
+
+    Parameters:
+        class_ids: List[str]
+            A list of valid class IDs to retain.
+        labels_dir: PathLike
+            Directory containing label files.
+
+    Returns:
+        None
+    """
     labels_dir = Path(labels_dir).resolve()
     files_annotations = {}
     filenames = os.listdir(labels_dir)
@@ -255,6 +342,22 @@ def yolo_remove_annotations_not_in(class_ids, *, labels_dir):
 
 
 def yolo_recategorize_classes(classes: dict, labels_dir):
+    """
+    Recategorizes class IDs in label files and maps old IDs to new IDs.
+
+    Parameters:
+        classes: Dict[str, str]
+            Dictionary mapping old class IDs to new class names.
+        labels_dir: PathLike
+            Directory containing label files.
+
+    Returns:
+        Tuple[Dict[str, str], Dict[str, str]]
+            Updated class dictionary and mapping of old to new IDs.
+
+    Raises:
+        Exception: If recategorization fails.
+    """
     labels_dir = Path(labels_dir).resolve()
     old_new_map = {}
     for filename in tqdm(os.listdir(labels_dir), desc="Collecting class ids"):
@@ -309,6 +412,16 @@ def yolo_recategorize_classes(classes: dict, labels_dir):
 
 
 def convert_xml_bbox_to_yolo(df: pd.DataFrame):
+    """
+    Converts bounding boxes from XML format to YOLO format in a DataFrame.
+
+    Parameters:
+        df: pd.DataFrame
+            DataFrame containing XML bounding box information.
+
+    Returns:
+        None
+    """
     pbar = tqdm(
         total=df.shape[0], desc="Converting XML BBox to YOLO format", leave=False
     )
@@ -332,6 +445,16 @@ def convert_xml_bbox_to_yolo(df: pd.DataFrame):
 
 
 def convert_xml_dataframe_to_yolo(df: pd.DataFrame):
+    """
+    Converts a DataFrame from XML format to YOLO format.
+
+    Parameters:
+        df: pd.DataFrame
+            DataFrame with XML-style columns.
+
+    Returns:
+        None
+    """
     df.rename(
         columns={
             "filename": "filename",
@@ -348,10 +471,29 @@ def convert_xml_dataframe_to_yolo(df: pd.DataFrame):
 
 
 def predict_on_image_stream(model, *, images, conf=0.6, **kwargs):
+    """
+    Streams predictions for a batch of images using a model.
+
+    Parameters:
+        model: Model
+            The YOLO model instance.
+        images: List[np.ndarray]
+            List of images to predict on.
+        conf: float, optional
+            Confidence threshold for predictions. Default is 0.6.
+        kwargs: dict
+            Additional arguments for the model's predict function.
+
+    Yields:
+        Tuple[ResultStats, Path]: Detection results and associated image paths.
+
+    Raises:
+        Exception: If prediction fails for any image batch.
+    """
     batch_size = kwargs.get("batch_size")
     if batch_size is None:
         num_workers = kwargs.get("num_workers")
-        batch_size = num_workers if num_workers is not None else get_cpu_count()
+        batch_size = num_workers if num_workers is not None else NUM_CPU
     else:
         kwargs.pop("batch_size")
     for i in range(0, len(images) - 1, batch_size):
@@ -374,6 +516,22 @@ def predict_on_image_stream(model, *, images, conf=0.6, **kwargs):
 
 
 def predict_on_image(model, image, conf=0.6, **kwargs):
+    """
+    Predicts on a single image using the specified model.
+
+    Parameters:
+        model: Model
+            The YOLO model instance.
+        image: np.ndarray
+            Image to predict on.
+        conf: float, optional
+            Confidence threshold for predictions. Default is 0.6.
+        kwargs: dict
+            Additional arguments for the model's predict function.
+
+    Returns:
+        ResultStats: Processed prediction results.
+    """
     result = model.predict(
         image,
         conf=conf,
@@ -383,6 +541,17 @@ def predict_on_image(model, image, conf=0.6, **kwargs):
 
 
 def get_result_stats(result):
+    """
+    Extracts detection and segmentation statistics from YOLO results.
+
+    Parameters:
+        result: YOLOResult
+            The result object from YOLO model prediction.
+
+    Returns:
+        Tuple[YOLOResult, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+            Processed detection and segmentation results.
+    """
     # Detection
     classes = result.boxes.cls.cpu().numpy()  # cls, (N, 1)
     probs = result.boxes.conf.cpu().numpy()  # confidence score, (N, 1)
@@ -398,6 +567,16 @@ def get_result_stats(result):
 
 
 def mask_to_polygon(mask):
+    """
+    Converts a binary mask to polygons.
+
+    Parameters:
+        mask: np.ndarray
+            Binary mask.
+
+    Returns:
+        List[Polygon]: List of polygons derived from the mask.
+    """
     # Assuming mask is binary, extract polygons from mask
     mask = (mask * 255).astype(np.uint8).squeeze()
     # print(type(mask), mask.shape, mask.dtype, mask.min(), mask.max())
@@ -407,6 +586,17 @@ def mask_to_polygon(mask):
 
 
 def parse_subregion_and_years_from_path(image_path):
+    """
+    Parses the subregion and years from the file path.
+
+    Parameters:
+        image_path: str
+            Path to the image file.
+
+    Returns:
+        Tuple[str, Tuple[int, int]]:
+            Subregion and start-end year range.
+    """
     parts = Path(image_path).stem.split("_")
     subregion = parts[0]
     years = parts[1]
@@ -425,15 +615,36 @@ def parse_subregion_and_years_from_path(image_path):
     return subregion, (int(years[0]), int(years[1]))
 
 
-def predict_geotiff(model, geotiff_path, confidence, chip_size, imgsz, **kwargs):
-    chips, epsg_code = chip_geotiff_and_convert_to_png(
-        geotiff_path, chip_size=chip_size
+def predict_geotiff(model, geotiff_path, confidence, tile_size, imgsz, **kwargs):
+    """
+    Predicts on GeoTIFF data using a YOLO model.
+
+    Parameters:
+        model: YOLOModel
+            The YOLO model instance.
+        geotiff_path: str
+            Path to the GeoTIFF file.
+        confidence: float
+            Confidence threshold for predictions.
+        tile_size: int
+            Size of tiles for processing.
+        imgsz: Tuple[int, int]
+            Image size for YOLO model input.
+        kwargs: dict
+            Additional arguments for prediction.
+
+    Returns:
+        Tuple[List[Results], GeoDataFrame]:
+            Detection results and processed GeoDataFrame with geometries.
+    """
+    tiles, epsg_code = tile_raster_and_convert_to_png(
+        geotiff_path, tile_size=tile_size
     )
     results = []
 
-    pbar = tqdm(total=len(chips), desc="Detections 0", leave=False)
+    pbar = tqdm(total=len(tiles), desc="Detections 0", leave=False)
     for result in predict_on_image_stream(
-        model, imgsz=imgsz, images=chips, conf=confidence, **kwargs
+        model, imgsz=imgsz, images=tiles, conf=confidence, **kwargs
     ):
         if result is not None and result[0][1][1] is not None:
             results.append(result)
@@ -521,15 +732,6 @@ def predict_geotiff(model, geotiff_path, confidence, chip_size, imgsz, **kwargs)
         unioned_geometry = normalize(unioned_geometry)
         geometry.append(unioned_geometry)
 
-    # If unioned_geometry is a MultiPolygon, each separate polygon will be handled as distinct
-    #
-    # if isinstance(unioned_geometry, Polygon):
-    #     distinct_geometries = [unioned_geometry]  # A single unioned Polygon
-    # elif isinstance(unioned_geometry, MultiPolygon):
-    #     distinct_geometries = list(
-    #         unioned_geometry.geoms
-    #     )  # List of separate polygons in the unioned result
-
     rows = []
     geometry = []
     for geom in distinct_geometries:
@@ -554,8 +756,28 @@ def predict_geotiff(model, geotiff_path, confidence, chip_size, imgsz, **kwargs)
 
 
 def predict_geotiffs(
-    model, geotiff_paths, *, confidence, chip_size, imgsz, max_images=2, **kwargs
+    model, geotiff_paths, *, confidence, tile_size, imgsz, max_images=2, **kwargs
 ):
+    """
+    Predicts geospatial data from a list of GeoTIFF file paths using a given model.
+
+    Parameters:
+        model: The model used for predictions (e.g., a machine learning model).
+        geotiff_paths (list of str): A list of paths to the GeoTIFF files.
+        confidence (float): The confidence threshold for predictions.
+        tile_size (int): The size of tiles to split the GeoTIFF into for processing.
+        imgsz (int): The image size to resize the GeoTIFF tiles to.
+        max_images (int, optional): Maximum number of images to process in parallel. Defaults to 2.
+        **kwargs: Additional keyword arguments passed to the `predict_geotiff` function.
+
+    Returns:
+        tuple: A tuple containing:
+            - results (list): A list of the prediction results for each GeoTIFF.
+            - gdfs (list): A list of GeoDataFrames containing geospatial data.
+
+    Example:
+        results, gdfs = predict_geotiffs(model, ["path/to/file1.tif", "path/to/file2.tif"], confidence=0.5, tile_size=256, imgsz=512)
+    """
     results = []
     gdfs = []
 
@@ -574,7 +796,7 @@ def predict_geotiffs(
                 model,
                 path,
                 confidence,
-                chip_size=chip_size,
+                tile_size=tile_size,
                 imgsz=imgsz,
                 **kwargs,
             )
@@ -612,7 +834,7 @@ def ndvi_to_yolo_dataset(
     start_year_col="start_year",
     end_year_col="end_year",
     geom_col="geometry",
-    chip_size=None,
+    tile_size=None,
     clean_dest=False,
     xy_to_index=True,
     encoder=encode_default_classes,
@@ -630,13 +852,53 @@ def ndvi_to_yolo_dataset(
     shuffle_split=True,
     shuffle_background=True,
     background_bias=None,
-    min_labels_required=10,
     pbar_leave=True,
     num_workers=None,
 ):
+    """
+    Converts NDVI (Normalized Difference Vegetation Index) data into a YOLO-compatible dataset format.
+
+    Parameters:
+        shp_file (str): Path to the shapefile containing the polygons.
+        ndvi_dir (str): Directory containing the NDVI image files.
+        output_dir (str): Directory where the output dataset will be saved.
+        years (list of int, optional): A list of years to process. Defaults to None.
+        start_year_col (str, optional): Column name for the start year. Defaults to "start_year".
+        end_year_col (str, optional): Column name for the end year. Defaults to "end_year".
+        geom_col (str, optional): Column name for the geometry data. Defaults to "geometry".
+        tile_size (int, optional): Size of the tiles for the NDVI data. Defaults to None.
+        clean_dest (bool, optional): Whether to clean the destination directory before saving. Defaults to False.
+        xy_to_index (bool, optional): Whether to convert coordinates to an index. Defaults to True.
+        encoder (function, optional): Function for encoding class labels. Defaults to `encode_default_classes`.
+        exist_ok (bool, optional): Whether to overwrite existing files. Defaults to False.
+        save_csv (bool, optional): Whether to save the dataset as a CSV file. Defaults to False.
+        save_shp (bool, optional): Whether to save the dataset as a shapefile. Defaults to False.
+        save_gpkg (bool, optional): Whether to save the dataset as a geopackage. Defaults to False.
+        ignore_empty_geom (bool, optional): Whether to ignore empty geometries. Defaults to True.
+        generate_labels (bool, optional): Whether to generate labels for the dataset. Defaults to True.
+        tif_to_png (bool, optional): Whether to convert TIFF images to PNG format. Defaults to True.
+        use_segments (bool, optional): Whether to use segments in the dataset. Defaults to True.
+        generate_train_data (bool, optional): Whether to generate training data. Defaults to True.
+        split (float, optional): Proportion of data to use for training. Defaults to 0.75.
+        split_mode (str, optional): Mode of data splitting ("all", "random", etc.). Defaults to "all".
+        shuffle_split (bool, optional): Whether to shuffle the data when splitting. Defaults to True.
+        shuffle_background (bool, optional): Whether to shuffle background images. Defaults to True.
+        background_bias (float, optional): Bias factor for background data. Defaults to None.
+        min_labels_required (int, optional): Minimum number of labels required for a valid dataset. Defaults to 10.
+        pbar_leave (bool, optional): Whether to leave the progress bar after completion. Defaults to True.
+        num_workers (int, optional): Number of worker processes for parallel processing. Defaults to None.
+
+    Returns:
+        tuple: A tuple containing:
+            - yolo_ds (YOLODataset): The YOLO dataset object.
+            - train_data (optional): The training data if generated.
+
+    Example:
+        yolo_ds, train_data = ndvi_to_yolo_dataset("path/to/shapefile.shp", "path/to/ndvi_dir", "path/to/output_dir", years=[2020, 2021], generate_labels=True)
+    """
     ignore_empty_geom = ignore_empty_geom and background_bias is None
 
-    gdf, (meta_dir, chips_dir, output_fname) = make_ndvi_dataset(
+    gdf, (meta_dir, tiles_dir, output_fname) = make_ndvi_difference_dataset(
         shp_file,
         ndvi_dir,
         output_dir,
@@ -644,7 +906,7 @@ def ndvi_to_yolo_dataset(
         start_year_col=start_year_col,
         end_year_col=end_year_col,
         geom_col=geom_col,
-        chip_size=chip_size,
+        tile_size=tile_size,
         clean_dest=clean_dest,
         xy_to_index=xy_to_index,
         exist_ok=exist_ok,
@@ -701,13 +963,6 @@ def ndvi_to_yolo_dataset(
             )
     pbar.update()
 
-    if len(gdf) < min_labels_required:
-        pbar.set_description("Failed to create YOLO dataset - Error occured")
-        pbar.close()
-        raise ValueError(
-            f"Minimum number of labels is less than the minimum required: got {len(gdf)} when at least {min_labels_required} are required."
-        )
-
     pbar.set_description(
         f"Creating YOLO dataset - Creating YOLODataset with {len(gdf)} labels"
     )
@@ -741,7 +996,7 @@ def ndvi_to_yolo_dataset(
             )
 
             ds_images_dir = (
-                output_dir / "images" / "png-chips" if tif_to_png else chips_dir
+                output_dir / "images" / "png-tiles" if tif_to_png else tiles_dir
             )
             train_data = yolo_ds.split_data(
                 images_dir=ds_images_dir,
@@ -753,7 +1008,7 @@ def ndvi_to_yolo_dataset(
             )
 
             yolo_df = yolo_ds.data_frame
-            yolo_ds.compile(get_cpu_count())
+            yolo_ds.compile(NUM_CPU)
             yolo_ds.data_frame = yolo_df
 
     if save_csv:
@@ -767,6 +1022,19 @@ def ndvi_to_yolo_dataset(
 
 
 def to_yolo(gdf: gpd.GeoDataFrame, compile=True) -> YOLODataset:
+    """
+    Converts a GeoDataFrame into a YOLO dataset format.
+
+    Parameters:
+        gdf (GeoDataFrame): A GeoDataFrame containing the labeled data.
+        compile (bool, optional): Whether to compile the dataset. Defaults to True.
+
+    Returns:
+        YOLODataset: The resulting YOLO dataset.
+
+    Example:
+        yolo_ds = to_yolo(gdf)
+    """
     gdf = gdf.copy()
     gdf["geometry"] = gdf["geometry"].apply(
         lambda x: stringify_points(x.exterior.coords)
@@ -778,7 +1046,7 @@ def to_yolo(gdf: gpd.GeoDataFrame, compile=True) -> YOLODataset:
             tmp_path,
             segments_key="geometry",
             convert_bounds_to_bbox=True,
-            num_workers=get_cpu_count(),
+            num_workers=NUM_CPU,
             compile=compile,
         )
         if os.path.isfile(tmp_path):
@@ -791,6 +1059,20 @@ def to_yolo(gdf: gpd.GeoDataFrame, compile=True) -> YOLODataset:
 
 
 def draw_yolo_bboxes(image_path, label_path, class_names=None):
+    """
+    Draws YOLO-style bounding boxes on an image based on the provided label file.
+
+    Parameters:
+        image_path (str): Path to the image file.
+        label_path (str): Path to the YOLO label file (text file containing bounding boxes).
+        class_names (list of str, optional): A list of class names for labeling the bounding boxes. Defaults to None.
+
+    Returns:
+        np.ndarray: The image with bounding boxes drawn on it.
+
+    Example:
+        img_with_bboxes = draw_yolo_bboxes("image.jpg", "image.txt", class_names=["class1", "class2"])
+    """
     # Load the image using OpenCV
     img = cv2.imread(image_path)
     img_height, img_width = img.shape[:2]
@@ -841,6 +1123,20 @@ def draw_yolo_bboxes(image_path, label_path, class_names=None):
 def yolo_create_truth_and_prediction_pairs(
     truth_images_dir, truth_labels_dir, pred_images_dir
 ):
+    """
+    Creates pairs of ground truth and predicted images with YOLO bounding boxes for evaluation.
+
+    Parameters:
+        truth_images_dir (str): Directory containing the ground truth images.
+        truth_labels_dir (str): Directory containing the ground truth YOLO label files.
+        pred_images_dir (str): Directory containing the predicted images.
+
+    Returns:
+        list of tuple: A list of pairs of images (ground truth and predicted images).
+
+    Example:
+        images = yolo_create_truth_and_prediction_pairs("truth_images", "truth_labels", "pred_images")
+    """
     truth_image_paths = collect_files_with_suffix([".jpg", ".png"], truth_images_dir)
     truth_label_paths = collect_files_with_suffix(".txt", truth_labels_dir)
     pred_image_paths = collect_files_with_suffix([".jpg", ".png"], pred_images_dir)

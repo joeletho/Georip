@@ -4,11 +4,10 @@ import os
 import random
 import shutil
 import sys
-import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ctypes import ArgumentError
 from pathlib import Path
-from time import sleep, time
+from time import time
 from types import FunctionType
 from xml.etree import ElementTree as ET
 
@@ -16,7 +15,6 @@ import cv2
 import matplotlib.patches as patches
 import numpy as np
 import pandas as pd
-import PIL
 import rasterio
 import skimage
 import supervision as sv
@@ -31,13 +29,23 @@ from torchvision.transforms import v2 as T
 from torchvision.transforms.v2 import functional as F
 from tqdm.auto import tqdm, trange
 
+from ftcnn.io import clear_directory, collect_files_with_suffix, pathify
 from ftcnn.modeling.maskrcnn import collate_fn
+from ftcnn.utils import NUM_CPU, TQDM_INTERVAL, Lock
+
 from ftcnn.utils import (Lock, clear_directory, collect_files_with_suffix,
                          get_cpu_count, pathify)
+
+
+
+from shapely.geometry import MultiPolygon
+import geopandas as gdp
+from shapely.ops import unary_union
 
 warnings.filterwarnings("ignore", "GeoSeries.notna", UserWarning)
 
 TQDM_INTERVAL = 1 / 100
+
 
 XYPair = tuple[float | int, float | int]
 XYInt = tuple[int, int]
@@ -208,15 +216,6 @@ class YOLODataset(Serializable):
                 num_workers = 1
             self.compile(num_workers)
 
-    def __request_lock__(self):
-        while self._lock.is_locked():
-            sleep(TQDM_INTERVAL)
-        self._lock.lock()
-        return self._lock
-
-    def __free_lock__(self):
-        self._lock.unlock()
-
     def get_num_classes(self):
         return len(self.class_map.keys()) if hasattr(self, "class_map") else 0
 
@@ -241,7 +240,7 @@ class YOLODataset(Serializable):
         )
         nval_labels = self.data_frame.loc[self.data_frame["type"] == "val"].shape[0]
 
-        self.__request_lock__()
+        lock_id = self._lock.acquire()
         print(
             "YOLO Dataset information\n"
             + f"Number of labels: {len(self.labels)}\n"
@@ -250,7 +249,7 @@ class YOLODataset(Serializable):
             + f"Training data: {ntrain_images} images, {ntrain_labels} labels\n"
             + f"Validation data: {nval_images} images, {nval_labels} labels\n"
         )
-        self.__free_lock__()
+        self._lock.free(lock_id)
 
     def summary(self):
         ntrain_images = (
@@ -266,7 +265,7 @@ class YOLODataset(Serializable):
         )
         nval_labels = self.data_frame.loc[self.data_frame["type"] == "val"].shape[0]
 
-        self.__request_lock__()
+        lock_id = self._lock.acquire()
         print(
             "YOLO Dataset summary\n"
             + f"Number of labels: {len(self.labels)}\n"
@@ -279,7 +278,7 @@ class YOLODataset(Serializable):
             + "\n\n"
             + f"Data:\n{self.data_frame}\n"
         )
-        self.__free_lock__()
+        self._lock.free(lock_id)
 
     @staticmethod
     def get_mapped_classes(labels: list[AnnotatedLabel]):
@@ -404,20 +403,20 @@ class YOLODataset(Serializable):
         def __exec__(labels):
             total_updates = len(labels)
             updates = 0
-            self.__request_lock__()
+            lock_id = self._lock.acquire()
             pbar = trange(
                 total_updates,
                 desc="Compiling YOLODataset labels and images",
                 leave=False,
             )
             pbar.refresh()
-            self.__free_lock__()
+            self._lock.free(lock_id)
 
             start = time()
             for i, label in enumerate(labels):
-                self.__request_lock__()
+                lock_id = self._lock.acquire()
                 self.class_distribution[label.class_name] += 1
-                self.__free_lock__()
+                self._lock.free(lock_id)
 
                 image_data = None
                 for image in self.images:
@@ -425,12 +424,12 @@ class YOLODataset(Serializable):
                         image_data = image
                         break
                 if image_data is None:
-                    self.__request_lock__()
+                    lock_id = self._lock.acquire()
                     print(
                         f"Image '{label.image_filename}' not found in labels -- label flagged for removal",
                         file=sys.stderr,
                     )
-                    self.__free_lock__()
+                    self._lock.free(lock_id)
                     indices_to_remove.append(i)
                     continue
 
@@ -460,7 +459,7 @@ class YOLODataset(Serializable):
                 else:
                     label.segments = ""
 
-                self.__request_lock__()
+                lock_id = self._lock.acquire()
                 data["type"].append(
                     label.type
                     if label.type is not None and len(label.type) > 0
@@ -479,14 +478,14 @@ class YOLODataset(Serializable):
                 data["segments"].append(
                     " ".join([str(point) for point in label.segments]),
                 )
-                self.__free_lock__()
+                self._lock.free(lock_id)
 
                 if time() - start >= TQDM_INTERVAL:
-                    self.__request_lock__()
+                    lock_id = self._lock.acquire()
                     pbar.update()
                     updates += 1
                     start = time()
-                    self.__free_lock__()
+                    self._lock.free(lock_id)
             if updates < total_updates:
                 pbar.update(total_updates - updates)
             pbar.close()
@@ -494,7 +493,7 @@ class YOLODataset(Serializable):
         if len(self.labels) < 100:
             __exec__(self.labels)
         else:
-            num_workers = max(1, min(num_workers, get_cpu_count()))
+            num_workers = max(1, min(num_workers, NUM_CPU))
 
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
                 futures = []
@@ -513,7 +512,7 @@ class YOLODataset(Serializable):
         self.data_frame = self.data_frame.drop_duplicates()
 
         if len(indices_to_remove) > 0:
-            self.__request_lock__()
+            lock_id = self._lock.acquire()
             print("Cleaning unused labels ...")
             for counter, index in enumerate(indices_to_remove):
                 pop_index = index - counter + 1
@@ -521,7 +520,7 @@ class YOLODataset(Serializable):
                     break
                 label = self.labels.pop(pop_index)
                 print(f"  Removed: {label}")
-            self.__free_lock__()
+            self._lock.free(lock_id)
 
         return self
 
@@ -660,10 +659,10 @@ class YOLODataset(Serializable):
         total_updates = self.data_frame.shape[0]
         updates = 0
         start = time()
-        self.__request_lock__()
+        lock_id = self._lock.acquire()
         pbar = trange(total_updates, desc="Generating labels")
         pbar.refresh()
-        self.__free_lock__()
+        self._lock.free(lock_id)
         for _, row in self.data_frame.iterrows():
             _dest_path: Path = dest_path
             filename = Path(str(row["filename"]))
@@ -719,13 +718,13 @@ class YOLODataset(Serializable):
         if updates < total_updates:
             pbar.update(total_updates - updates)
 
-        self.__request_lock__()
+        lock_id = self._lock.acquire()
         pbar.set_description("Complete")
         pbar.close()
         print(
             f"Successfully generated {annotations} annoations and {backgrounds} backgrounds to {len(files)} files"
         )
-        self.__free_lock__()
+        self._lock.free(lock_id)
 
     def generate_yaml_file(
         self,
@@ -2167,3 +2166,55 @@ def plot_paired_images(paired_images, nrows=1, ncols=2, figsize=(15, 15)):
 
     plt.tight_layout()
     plt.show()
+
+def clean_shapeFile(shapeFile):
+    """ 
+    1. Pass the file name to the shapefile that needs to be cleaned.
+    2. Function will great geopandas dataframe
+    3. Function then itereates throught all the polygons checking to see if when buffer
+    is applied they overlap. If they overlap we will combine them by applying union.
+    4. Output is a geopandas dataframe that has combined polygons that should be one.
+    (Note: because buffer is a dialation operation the new polygons are slightly skewed but it can be minimal)
+    """
+
+    
+    gdf = gdp.read_file(shapeFile) #read from shape file and create geopandas dataframe
+
+    modified_gdf = gdp.GeoDataFrame(columns=gdf.columns,crs= gdf.crs)#create a new dataframe for output
+
+    rows =[]
+
+    #iterate checking each polygon with everyother polygon 
+    for j in range(len(gdf) - 1):
+        ply1= gdf.iloc[j].geometry #add the polygon to the dataframe in case it doesnt get unionized
+        rows.append({"geometry": ply1})
+        for i in range(j+1,len(gdf)):
+            ply2 = gdf.iloc[i].geometry
+
+            buffer_distance = 8 #set buffer distance to dilate the polygons [(8-10) should be the sweet spot]
+
+            ply1_buf = ply1.buffer(buffer_distance) 
+            ply2_buf = ply2.buffer(buffer_distance)
+
+            if ply1_buf.intersects(ply2_buf): #if the dialated polygons interesect we combine the with union operation
+                result = unary_union([ply2_buf, ply1_buf])
+                rows.append({"geometry": result})
+           
+            
+
+
+    new_rows_gdf = gdp.GeoDataFrame(rows, crs=gdf.crs) #Create a new dataframe with the new polygons 
+    modified_gdf = pd.concat([modified_gdf, new_rows_gdf], ignore_index=True) #add this polygons to the final output
+    unioned_geometry = unary_union(modified_gdf.geometry) #clean up smaller polygons which may still be in larger ones
+
+    # If the result is a MultiPolygon, split it back into individual polygons
+    if isinstance(unioned_geometry, MultiPolygon):
+        unioned_rows = [{"geometry": geom} for geom in unioned_geometry.geoms]
+    else:
+        unioned_rows = [{"geometry": unioned_geometry}]
+
+    # Create a new GeoDataFrame from the unioned geometries
+    final_gdf = gdp.GeoDataFrame(unioned_rows, columns=["geometry"], crs=modified_gdf.crs)
+
+    #return the final modified polygons as a geopandas dataframe
+    return final_gdf

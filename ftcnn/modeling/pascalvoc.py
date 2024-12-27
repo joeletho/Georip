@@ -5,9 +5,8 @@ from pathlib import Path
 import pandas as pd
 from tqdm.auto import tqdm, trange
 
-from ftcnn.utils import get_cpu_count
-
-from .types import XMLTree
+from ftcnn.modeling.utils import XMLTree
+from ftcnn.utils import NUM_CPU
 
 
 def pascal_xml_annotation_to_csv(xmlpath, imgdir, destpath):
@@ -163,7 +162,7 @@ def pascal_process_xml_files_to_dataframe(xmldir, *, parallel=True):
         desc="Processing XML files to XML DataFrame",
         leave=False,
     )
-    with ThreadPoolExecutor(max_workers=get_cpu_count()) as executor:
+    with ThreadPoolExecutor(max_workers=NUM_CPU) as executor:
         count = 1
         futures = []
         for i in range(0, nfiles, chunksize):
@@ -197,7 +196,7 @@ def pascal_process_xml_to_csv_files(csvdir, imgdir, destdir):
             files.append(filepath)
 
     nfiles = len(files)
-    nthreads = get_cpu_count()
+    nthreads = NUM_CPU
     chunksize = nfiles // nthreads
 
     def __process_chunk__(files, _imgdir, _destdir):
