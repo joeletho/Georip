@@ -197,7 +197,7 @@ class YOLODataset(Serializable):
         self.labels = labels
         self.images = images
 
-        if compile and len(labels) > 0 and len(images) > 0:
+        if compile:
             if num_workers is None:
                 num_workers = 1
             self.compile(num_workers)
@@ -375,13 +375,16 @@ class YOLODataset(Serializable):
             "path": [],
             "segments": [],
         }
-        if not (len(self.labels) and len(self.images)):
-            raise ValueError("Dataset does not contain valid data.")
-
         self.labels = list(set(self.labels))
         self.images = list(set(self.images))
 
         self.class_map = YOLODataset.get_mapped_classes(self.labels)
+
+        if not (len(self.labels) and len(self.images)):
+            raise ValueError("Dataset is empty")
+        if not len(self.class_map.keys()):
+            raise ValueError("Dataset does not contain classes")
+
         self.class_distribution = {name: 0 for name in self.class_map.keys()}
 
         indices_to_remove = []

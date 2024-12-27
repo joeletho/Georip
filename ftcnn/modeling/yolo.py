@@ -842,7 +842,6 @@ def ndvi_to_yolo_dataset(
     save_csv=False,
     save_shp=False,
     save_gpkg=False,
-    ignore_empty_geom=True,
     generate_labels=True,
     tif_to_png=True,
     use_segments=True,
@@ -874,7 +873,6 @@ def ndvi_to_yolo_dataset(
         save_csv (bool, optional): Whether to save the dataset as a CSV file. Defaults to False.
         save_shp (bool, optional): Whether to save the dataset as a shapefile. Defaults to False.
         save_gpkg (bool, optional): Whether to save the dataset as a geopackage. Defaults to False.
-        ignore_empty_geom (bool, optional): Whether to ignore empty geometries. Defaults to True.
         generate_labels (bool, optional): Whether to generate labels for the dataset. Defaults to True.
         tif_to_png (bool, optional): Whether to convert TIFF images to PNG format. Defaults to True.
         use_segments (bool, optional): Whether to use segments in the dataset. Defaults to True.
@@ -896,8 +894,6 @@ def ndvi_to_yolo_dataset(
     Example:
         yolo_ds, train_data = ndvi_to_yolo_dataset("path/to/shapefile.shp", "path/to/ndvi_dir", "path/to/output_dir", years=[2020, 2021], generate_labels=True)
     """
-    ignore_empty_geom = ignore_empty_geom and background_bias is None
-
     gdf, (meta_dir, tiles_dir, output_fname) = make_ndvi_difference_dataset(
         shp_file,
         ndvi_dir,
@@ -913,7 +909,6 @@ def ndvi_to_yolo_dataset(
         save_csv=save_csv,
         save_shp=save_shp,
         save_gpkg=False,
-        ignore_empty_geom=ignore_empty_geom,
         tif_to_png=tif_to_png,
         pbar_leave=False,
         num_workers=num_workers,
@@ -933,7 +928,7 @@ def ndvi_to_yolo_dataset(
 
     labeled_images = gdf.loc[gdf["class_id"] != -1].values.tolist()
 
-    if ignore_empty_geom or background_bias is None:
+    if background_bias is None:
         new_rows = labeled_images
     else:
         background_images = gdf.loc[gdf["class_id"] == -1].values.tolist()
