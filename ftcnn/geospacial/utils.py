@@ -1,9 +1,10 @@
+from os import PathLike
 from pathlib import Path
 from typing import Callable
 
 import geopandas as gpd
 import pandas as pd
-from shapely.geometry import Polygon
+from shapely import MultiPolygon, Polygon, unary_union
 
 from ftcnn.geometry import PolygonLike
 from ftcnn.geometry.polygons import get_polygon_points
@@ -143,3 +144,99 @@ def translate_xy_coords_to_index(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
             polygon = translate_polygon_xy_to_index(row["path"], row["geometry"])
             gdf.at[i, "geometry"] = Polygon(get_polygon_points(polygon))
     return gdf
+
+
+def merge_overlapping_geometries(
+    source_shp: PathLike, distance: int = 8
+) -> gpd.GeoDataFrame:
+    """
+    Merges overlapping geometries in a shapefile by buffering and unionizing them.
+    Attributes are combined for merged geometries, and smaller polygons inside larger ones are removed.
+
+    Parameters:
+        source_shp (PathLike): Path to the input shapefile.
+        distance (int): Buffer distance to expand geometries for intersection checks.
+
+    Returns:
+        gpd.GeoDataFrame: A GeoDataFrame containing the merged geometries with updated attributes.
+    """
+    gdf = gpd.read_file(
+        source_shp
+    )  # read from shape file and create geopandas dataframe
+
+    modified_gdf = gpd.GeoDataFrame(
+        columns=gdf.columns, crs=gdf.crs
+    )  # create a new dataframe for output
+
+    rows = []
+
+    # iterate checking each polygon with everyother polygon
+    for j in range(len(gdf) - 1):
+        ply1 = gdf.iloc[
+            j
+        ].geometry  # Add the polygon to the dataframe in case it doesn't get unionized
+        ply1_attributes = gdf.iloc[j].drop("geometry").to_dict()  # Extract attributes
+        rows.append(
+            {**ply1_attributes, "geometry": ply1}
+        )  # Add the polygon and attributes
+
+        for i in range(j + 1, len(gdf)):
+            ply2 = gdf.iloc[i].geometry
+            ply2_attributes = (
+                gdf.iloc[i].drop("geometry").to_dict()
+            )  # Extract attributes
+
+            ply1_buf = ply1.buffer(distance)
+            ply2_buf = ply2.buffer(distance)
+
+            if ply1_buf.intersects(
+                ply2_buf
+            ):  # If the dilated polygons intersect, unionize
+                result = unary_union([ply2_buf, ply1_buf])
+                minx, miny, maxx, maxy = result.bounds
+
+                bbox_x = minx
+                bbox_y = miny
+                bbox_w = maxx - minx
+                bbox_h = maxy - miny
+
+                new_row = {**ply1_attributes, **ply2_attributes}
+                new_row.update(
+                    {
+                        "bbox_x": bbox_x,
+                        "bbox_y": bbox_y,
+                        "bbox_w": bbox_w,
+                        "bbox_h": bbox_h,
+                        "geometry": result,
+                    }
+                )
+                rows.append(new_row)
+
+    # Create a new GeoDataFrame with the new polygons
+    new_rows_gdf = gpd.GeoDataFrame(rows, crs=gdf.crs)
+    modified_gdf = pd.concat([modified_gdf, new_rows_gdf], ignore_index=True)
+
+    # Clean up smaller polygons that may still be in larger ones
+    unioned_geometry = unary_union(modified_gdf.geometry)
+
+    # If the result is a MultiPolygon, split it back into individual polygons
+    if isinstance(unioned_geometry, MultiPolygon):
+        unioned_rows = []
+        for geom in unioned_geometry.geoms:
+            # Find overlapping polygons to retain attributes
+            overlapping_rows = modified_gdf[modified_gdf.geometry.intersects(geom)]
+            if not overlapping_rows.empty:
+                representative_row = overlapping_rows.iloc[
+                    0
+                ].to_dict()  # Take attributes of the first match
+                representative_row["geometry"] = geom
+                unioned_rows.append(representative_row)
+    else:
+        representative_row = modified_gdf.iloc[
+            0
+        ].to_dict()  # Take attributes of the first row
+        representative_row["geometry"] = unioned_geometry
+        unioned_rows = [representative_row]
+
+    # Create a new GeoDataFrame from the unioned geometries
+    return gpd.GeoDataFrame(unioned_rows, columns=["geometry"], crs=modified_gdf.crs)
