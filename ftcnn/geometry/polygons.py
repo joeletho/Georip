@@ -1,10 +1,15 @@
+from pathlib import Path
+
 import geopandas as gpd
+import numpy as np
 import rasterio
 import shapely
+from osgeo.gdal import sys
 from rasterio.io import DatasetWriter
 from rasterio.windows import Window
-from shapely import normalize, polygonize
+from shapely import normalize
 from shapely.geometry import Polygon
+from supervision.annotators.core import cv2
 
 from ftcnn.geometry import PolygonLike
 
@@ -115,7 +120,7 @@ def get_polygon_bboxes(geom: PolygonLike) -> list[Polygon]:
             for geom in geom.geoms:
                 boxes.append(normalize(shapely.box(*geom.bounds)))
         case _:
-            print("Unknown geometry type")
+            print(f"Unknown geometry type '{geom.geom_type}'", file=sys.stderr)
     return boxes
 
 
@@ -301,3 +306,22 @@ def normalize_polygon(
         polygon = normalize(polygon)
 
     return normalize(polygon.simplify(0.002, preserve_topology=True))
+
+
+def mask_to_polygon(mask):
+    """
+    Converts a binary mask to polygons.
+
+    Parameters:
+        mask: np.ndarray
+            Binary mask.
+
+    Returns:
+        List[Polygon]: List of polygons derived from the mask.
+    """
+    # Assuming mask is binary, extract polygons from mask
+    mask = (mask * 255).astype(np.uint8).squeeze()
+    # print(type(mask), mask.shape, mask.dtype, mask.min(), mask.max())
+    contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
+    polygons = [Polygon(c.reshape(-1, 2)) for c in contours if len(c) >= 3]
+    return polygons

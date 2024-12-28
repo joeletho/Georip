@@ -1,12 +1,20 @@
-from . import maskrcnn, utils, yolo
-from .utils import (AnnotatedLabel, BBox, ClassMap, ImageData, Serializable,
-                    XMLTree, XYInt, XYPair, YOLODataset, YOLODatasetLoader)
+from . import maskrcnn, utils
+from .utils import (
+    AnnotatedLabel,
+    BBox,
+    ClassMap,
+    ImageData,
+    Serializable,
+    XMLTree,
+    XYInt,
+    XYPair,
+)
+from .yolo import YOLODatasetBase, YOLODatasetLoader
 
 __all__ = [
-    "yolo",
     "utils",
     "maskrcnn",
-    "YOLODataset",
+    "YOLODatasetBase",
     "YOLODatasetLoader",
     "AnnotatedLabel",
     "ImageData",

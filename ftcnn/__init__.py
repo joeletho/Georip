@@ -3,12 +3,22 @@ import warnings
 from osgeo import gdal
 
 from .datasets import make_ndvi_difference_dataset
-from .modeling import (AnnotatedLabel, BBox, ClassMap, ImageData, Serializable,
-                       XMLTree, XYInt, XYPair, YOLODataset, YOLODatasetLoader)
+from .modeling import (
+    AnnotatedLabel,
+    BBox,
+    ClassMap,
+    ImageData,
+    Serializable,
+    XMLTree,
+    XYInt,
+    XYPair,
+    YOLODatasetBase,
+    YOLODatasetLoader,
+)
 
 __all__ = [
     "make_ndvi_difference_dataset",
-    "YOLODataset",
+    "YOLODatasetBase",
     "YOLODatasetLoader",
     "AnnotatedLabel",
     "ImageData",

@@ -74,6 +74,38 @@ def parse_filename(series: pd.Series) -> str:
     return "_".join([start_part, end_part])
 
 
+def parse_subregion_and_years_from_path(
+    image_path: PathLike,
+) -> tuple[str, tuple[int, int]]:
+    """
+    Parses the subregion and years from the file path.
+
+    Parameters:
+        image_path: str
+            Path to the image file.
+
+    Returns:
+        Tuple[str, Tuple[int, int]]:
+            Subregion and start-end year range.
+    """
+    parts = Path(image_path).stem.split("_")
+    subregion = parts[0]
+    years = parts[1]
+    if "extended" in years.lower():
+        subregion = subregion + "E"
+        years = parts[2]
+    elif subregion[-2:].isnumeric():
+        start = 0
+        while start < len(subregion) and not subregion[start].isdigit():
+            start += 1
+        if start >= len(subregion):
+            raise ValueError(f"Error parsing years from {image_path}")
+        years = subregion[start:]
+        subregion = subregion[:start]
+    years = years.split("to")
+    return subregion, (int(years[0]), int(years[1]))
+
+
 def encode_classes(
     df: DataFrameLike, encoder: Callable = encode_default_classes
 ) -> DataFrameLike:

@@ -1,5 +1,8 @@
+import os
 from os import PathLike
 from pathlib import Path
+
+from geopandas import gpd
 
 from ftcnn.io import clear_directory
 
@@ -13,7 +16,7 @@ def init_dataset_filepaths(
     save_shp: bool = True,
     save_gpkg: bool = True,
     clean_dest: bool,
-    exist_ok: bool = False
+    exist_ok: bool = False,
 ) -> dict[str, Path]:
     source_shp, images_dir, output_dir = (
         Path(source_shp),
@@ -45,3 +48,34 @@ def init_dataset_filepaths(
         "shp_dir": shp_dir,
         "tiles_dir": tiles_dir,
     }
+
+
+def cleanup_unused_tiles(
+    gdf: gpd.GeoDataFrame, geom_col: str, img_path_col: str
+) -> gpd.GeoDataFrame:
+    """
+    Removes unused tiles (files and empty directories) based on a GeoDataFrame.
+
+    Parameters:
+        gdf (GeoDataFrame): The GeoDataFrame containing geometry and image paths.
+        geom_col (str): The column name in `gdf` that contains geometries.
+        img_path_col (str): The column name in `gdf` that contains image paths.
+
+    Returns:
+        GeoDataFrame: The updated GeoDataFrame with non-empty geometries.
+    """
+    unused_tiles = []
+
+    # Remove any tiles that do not map to an image in the dataframe
+    unused_tiles = gdf.loc[gdf[geom_col].is_empty, img_path_col].tolist()
+    gdf = gpd.GeoDataFrame(gdf[~gdf[geom_col].is_empty].reset_index(drop=True))
+
+    for path in unused_tiles:
+        path = Path(path)
+        parent = path.parent
+        if path.exists():
+            os.remove(path)
+        if parent.exists() and len(os.listdir(parent)) == 0:
+            os.rmdir(parent)
+
+    return gdf

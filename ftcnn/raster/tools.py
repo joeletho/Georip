@@ -211,5 +211,6 @@ def create_raster_tiles(
                     pbar.update()
                     updates += 1
                     start = time()
-    pbar.close()
+        pbar.update(total_updates - updates)
+        pbar.close()
     return tiles

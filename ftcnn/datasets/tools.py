@@ -1,13 +1,12 @@
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from os import PathLike
 from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
-from tqdm.auto import tqdm, trange
+from tqdm.auto import trange
 
-from ftcnn.datasets.utils import init_dataset_filepaths
+from ftcnn.datasets.utils import cleanup_unused_tiles, init_dataset_filepaths
 from ftcnn.geospacial.mapping import map_geometries_by_year_span
 from ftcnn.geospacial.processing import preprocess_shapefile
 from ftcnn.geospacial.utils import translate_xy_coords_to_index
@@ -178,29 +177,17 @@ def preprocess_ndvi_difference_rasters(
 
     pbar.update()
 
-    tile_paths = [
-        str(path) for path in collect_files_with_suffix(".tif", tiles_dir, recurse=True)
-    ]
-    unused_tiles = []
-
-    # Remove any tiles that do not map to an image in the dataframe
-    unused_tiles = gdf.loc[gdf[geom_col].is_empty, img_path_col].tolist()
-    gdf = gpd.GeoDataFrame(gdf[~gdf[geom_col].is_empty].reset_index(drop=True))
-
-    for path in tqdm(unused_tiles, desc="Cleaning up", leave=False):
-        path = Path(path)
-        parent = path.parent
-        if path.exists():
-            os.remove(path)
-        if parent.exists() and len(os.listdir(parent)) == 0:
-            os.rmdir(parent)
-
-    pbar.update()
-    nfiles = max(0, len(tile_paths) - len(unused_tiles))
-    pbar.set_description(
-        "Processed {0} images and saved to {1}".format(nfiles, tiles_dir)
+    num_tiles = len(
+        [
+            str(path)
+            for path in collect_files_with_suffix(".tif", tiles_dir, recurse=True)
+        ]
     )
+    pbar.update()
     pbar.close()
+
+    num_tiles -= len(cleanup_unused_tiles(gdf, geom_col, img_path_col).keys())
+    print("Processed {0} images and saved to {1}".format(max(0, num_tiles), tiles_dir))
 
     return gpd.GeoDataFrame(
         gdf.drop_duplicates()
