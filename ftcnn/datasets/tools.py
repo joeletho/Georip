@@ -7,13 +7,19 @@ import geopandas as gpd
 import pandas as pd
 from tqdm.auto import tqdm, trange
 
-from ftcnn.geospacial.mapping import map_geometry_to_geotiffs
+from ftcnn.datasets.utils import init_dataset_filepaths
+from ftcnn.geospacial.mapping import map_geometries_by_year_span
 from ftcnn.geospacial.processing import preprocess_shapefile
 from ftcnn.geospacial.utils import translate_xy_coords_to_index
-from ftcnn.io import (clear_directory, collect_files_with_suffix, pathify,
-                      save_as_csv, save_as_gpkg, save_as_shp)
-from ftcnn.raster.tools import (create_raster_tiles,
-                                process_raster_to_png_conversion)
+from ftcnn.io import (
+    clear_directory,
+    collect_files_with_suffix,
+    pathify,
+    save_as_csv,
+    save_as_gpkg,
+    save_as_shp,
+)
+from ftcnn.raster.tools import create_raster_tiles, process_raster_to_png_conversion
 from ftcnn.utils import NUM_CPU
 
 
@@ -92,7 +98,6 @@ def preprocess_ndvi_difference_rasters(
     tile_size: int | tuple[int, int] | None = None,
     exist_ok: bool = False,
     clean_dest: bool = False,
-    ignore_empty_geom: bool = True,
     leave: bool = True,
     num_workers: int | None = None,
 ) -> gpd.GeoDataFrame:
@@ -110,7 +115,6 @@ def preprocess_ndvi_difference_rasters(
         tile_size (int | tuple[int, int] | None, optional): The size of the tiles to create. Defaults to None (default tile size).
         exist_ok (bool, optional): Whether to overwrite existing files. Defaults to False.
         clean_dest (bool, optional): Whether to clean the destination directory before saving. Defaults to False.
-        ignore_empty_geom (bool, optional): Whether to ignore empty geometries. Defaults to True.
         leave (bool, optional): Whether to leave the progress bar after completion. Defaults to True.
         num_workers (int | None, optional): The number of worker threads to use. Defaults to None (auto-detect).
 
@@ -129,6 +133,7 @@ def preprocess_ndvi_difference_rasters(
         end_year_col,
         clean_dest,
     )
+    tiles_dir = output_dir
 
     tile_size = tile_size if tile_size is not None else (None, None)
     if not isinstance(tile_size, tuple):
@@ -150,7 +155,7 @@ def preprocess_ndvi_difference_rasters(
                 path,
                 crs=gdf.crs,
                 tile_size=tile_size,
-                output_dir=output_dir / path.stem,
+                output_dir=tiles_dir / path.stem,
                 exist_ok=exist_ok,
             )
             for path in target_imgs
@@ -158,60 +163,42 @@ def preprocess_ndvi_difference_rasters(
         for _ in as_completed(futures):
             pbar.update()
 
-    # Group rows by the years in which they span. We want to ensure we are only
-    # applying geometry to rows which share the same start and end years.
-    year_pairs = gdf[[start_year_col, end_year_col]].drop_duplicates()
-    year_pairs = year_pairs.sort_values(by=[start_year_col, end_year_col])
-    start_years = [int(year) for year in year_pairs[start_year_col].tolist()]
-    end_years = [int(year) for year in year_pairs[end_year_col].tolist()]
+    mapped_gdfs = map_geometries_by_year_span(
+        gdf, tiles_dir, start_year_col, end_year_col
+    )
 
-    mapped_gdfs = []
-    for start_year, end_year in zip(start_years, end_years):
-        # Get the rows which match the start and end years
-        target_years = gpd.GeoDataFrame(
-            gdf[(gdf[start_year_col] == start_year) & (gdf[end_year_col] == end_year)]
+    if not len(mapped_gdfs) or mapped_gdfs[0].empty:
+        raise ValueError(
+            f"Did not find geometies for years {gdf[start_year_col].iat[0]} to {gdf[end_year_col].iat[0]}"
         )
-        gdf_mapped = map_geometry_to_geotiffs(
-            target_years,
-            output_dir,
-        )
-        # Insert the year columns into the mapped geodf
-        gdf_mapped.insert(0, start_year_col, start_year)
-        gdf_mapped.insert(1, end_year_col, end_year)
+    else:
+        gdf = gpd.GeoDataFrame(pd.concat(mapped_gdfs, ignore_index=True), crs=gdf.crs)
 
-        mapped_gdfs.append(gdf_mapped)
-
-    gdf = gpd.GeoDataFrame(pd.concat(mapped_gdfs, ignore_index=True), crs=gdf.crs)
     gdf.set_geometry("geometry", inplace=True)
 
     pbar.update()
 
     tile_paths = [
-        str(path)
-        for path in collect_files_with_suffix(".tif", output_dir, recurse=True)
+        str(path) for path in collect_files_with_suffix(".tif", tiles_dir, recurse=True)
     ]
     unused_tiles = []
 
-    if ignore_empty_geom:
-        # Remove any tiles that do not map to an image in the dataframe
-        unused_tiles = gdf.loc[gdf[geom_col].is_empty, img_path_col].tolist()
-        gdf = gpd.GeoDataFrame(gdf[~gdf[geom_col].is_empty].reset_index(drop=True))
+    # Remove any tiles that do not map to an image in the dataframe
+    unused_tiles = gdf.loc[gdf[geom_col].is_empty, img_path_col].tolist()
+    gdf = gpd.GeoDataFrame(gdf[~gdf[geom_col].is_empty].reset_index(drop=True))
 
-        for path in tqdm(unused_tiles, desc="Cleaning up", leave=False):
-            path = Path(path)
-            parent = path.parent
-            parent_parent = parent.parent
-            if path.exists():
-                os.remove(path)
-            if parent.exists() and len(os.listdir(parent)) == 0:
-                os.rmdir(parent)
-                if parent_parent.exists() and len(os.listdir(parent_parent)) == 0:
-                    os.rmdir(parent_parent)
+    for path in tqdm(unused_tiles, desc="Cleaning up", leave=False):
+        path = Path(path)
+        parent = path.parent
+        if path.exists():
+            os.remove(path)
+        if parent.exists() and len(os.listdir(parent)) == 0:
+            os.rmdir(parent)
 
     pbar.update()
     nfiles = max(0, len(tile_paths) - len(unused_tiles))
     pbar.set_description(
-        "Processed {0} images and saved to {1}".format(nfiles, output_dir)
+        "Processed {0} images and saved to {1}".format(nfiles, tiles_dir)
     )
     pbar.close()
 
@@ -238,7 +225,6 @@ def make_ndvi_difference_dataset(
     save_csv: bool = False,
     save_shp: bool = False,
     save_gpkg: bool = False,
-    ignore_empty_geom: bool = True,
     tif_to_png: bool = True,
     pbar_leave: bool = True,
     num_workers: int | None = None,
@@ -261,7 +247,6 @@ def make_ndvi_difference_dataset(
         save_csv (bool, optional): Whether to save the dataset as a CSV file. Defaults to False.
         save_shp (bool, optional): Whether to save the dataset as a shapefile. Defaults to False.
         save_gpkg (bool, optional): Whether to save the dataset as a geopackage. Defaults to False.
-        ignore_empty_geom (bool, optional): Whether to ignore empty geometries. Defaults to True.
         tif_to_png (bool, optional): Whether to convert GeoTIFF files to PNG format. Defaults to True.
         pbar_leave (bool, optional): Whether to leave the progress bar after completion. Defaults to True.
         num_workers (int | None, optional): The number of worker threads to use. Defaults to None (auto-detect).
@@ -274,27 +259,23 @@ def make_ndvi_difference_dataset(
     Example:
         gdf, meta = make_ndvi_difference_dataset("source.shp", "images_dir", "output_dir", years=(2015, 2020))
     """
-    source_shp, images_dir, output_dir = (
-        Path(source_shp),
-        Path(images_dir),
-        Path(output_dir),
+    filepaths = init_dataset_filepaths(
+        source_shp=source_shp,
+        images_dir=images_dir,
+        output_dir=output_dir,
+        exist_ok=exist_ok,
+        save_csv=save_csv,
+        save_shp=save_shp,
+        save_gpkg=save_gpkg,
+        clean_dest=clean_dest,
     )
-    meta_dir = output_dir / "meta"
-    csv_dir = meta_dir / "csv" / source_shp.stem
-    shp_dir = meta_dir / "shp" / source_shp.stem
-
-    if output_dir.exists() and clean_dest:
-        clear_directory(output_dir)
-    elif not output_dir.exists():
-        output_dir.mkdir(parents=True)
-
-    if save_csv:
-        csv_dir.mkdir(parents=True, exist_ok=exist_ok)
-    if save_shp or save_gpkg:
-        shp_dir.mkdir(parents=True, exist_ok=exist_ok)
-
-    tiles_dir = output_dir / "images" / "tiles"
-    tiles_dir.mkdir(parents=True, exist_ok=exist_ok)
+    source_shp = filepaths.get("source_shp")
+    images_dir = filepaths.get("images_dir")
+    output_dir = filepaths.get("output_dir")
+    meta_dir = filepaths.get("meta_dir")
+    csv_dir = filepaths.get("csv_dir")
+    shp_dir = filepaths.get("shp_dir")
+    tiles_dir = filepaths.get("tiles_dir")
 
     n_calls = 4
     n_calls += 1 if xy_to_index else 0
@@ -348,7 +329,6 @@ def make_ndvi_difference_dataset(
         tile_size=tile_size,
         clean_dest=clean_dest,
         exist_ok=exist_ok,
-        ignore_empty_geom=ignore_empty_geom,
         leave=False,
         num_workers=num_workers,
     )
@@ -396,7 +376,7 @@ def make_ndvi_difference_dataset(
         pbar.set_description("Creating NDVI dataset - Converting GeoTIFFs to PNGs")
 
         tif_png_file_map = process_raster_to_png_conversion(
-            tiles_dir, output_dir / "images" / "png-tiles", leave=False
+            tiles_dir, tiles_dir.parent / "png-tiles", leave=False
         )
         spbar = trange(len(gdf), desc="Mapping filepaths", leave=False)
         for i, row in gdf.iterrows():

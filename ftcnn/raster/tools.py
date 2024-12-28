@@ -8,6 +8,7 @@ import rasterio
 from tqdm.auto import trange
 
 from ftcnn.io import clear_directory, collect_files_with_suffix
+from ftcnn.raster.utils import get_rows_cols_min_max_bounds
 from ftcnn.utils import _WRITE_LOCK, NUM_CPU, TQDM_INTERVAL
 
 from . import create_window, write_raster
@@ -145,18 +146,12 @@ def create_raster_tiles(
     """
     source_path = Path(source_path)
     width, height = tile_size
+    if width <= 0 or height <= 0:
+        raise ValueError("Width and height must be valid positive integers")
     tiles = []
 
     with rasterio.open(source_path, crs=crs) as src:
-        bounds = src.bounds
-        rmin, cmin = src.index(bounds.left, bounds.top)
-        rmax, cmax = src.index(bounds.right, bounds.bottom)
-        rmin, rmax = min(rmin, rmax), max(rmin, rmax)
-        cmin, cmax = min(cmin, cmax), max(cmin, cmax)
-
-        if width <= 0 or height <= 0:
-            return []
-
+        (rmin, rmax), (cmin, cmax) = get_rows_cols_min_max_bounds(src)
         total_updates = (rmax // height) * (cmax // width)
         updates = 0
         start = time()
@@ -183,7 +178,10 @@ def create_raster_tiles(
                     min(width, cmax - col),
                     min(height, rmax - row),
                 )
-                tile_data = src.read(1, window=tile_window)
+                bands = (
+                    1 if src.count == 1 else [band for band in range(1, src.count + 1)]
+                )
+                tile_data = src.read(bands, window=tile_window, masked=True)
                 tile_data[tile_data == src.nodata] = np.NaN
 
                 # Skip empty or irrelevant tiles
@@ -203,6 +201,7 @@ def create_raster_tiles(
                             transform=tile_transform,
                             meta=src.meta.copy(),
                             output_path=tile_output_path,
+                            bands=bands,
                         ),
                         src.xy(row, col),
                     )

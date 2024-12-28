@@ -50,7 +50,7 @@ def pathify(path: PathLike | list[PathLike], *args) -> Path | list[Path]:
 
 def clear_directory(dir_path: PathLike) -> None:
     """
-    Remove all contents of a directory and recreate it as an empty directory.
+    Remove all files and subdirectories within a directory, preserving the directory itself.
 
     Parameters:
         dir_path (PathLike): Path to the directory to be cleared.
@@ -60,14 +60,21 @@ def clear_directory(dir_path: PathLike) -> None:
 
     Notes:
         - Deletes all files and subdirectories within `dir_path`.
-        - Recreates the directory to ensure it exists as an empty directory.
+        - Preserves the `dir_path` directory itself.
 
     Example:
         >>> clear_directory("output_dir")
         # "output_dir" is now an empty directory.
     """
-    shutil.rmtree(dir_path)
-    Path(dir_path).mkdir(parents=True)
+    dir_path = Path(dir_path)
+    if not dir_path.is_dir():
+        raise ValueError(f"The path '{dir_path}' is not a directory.")
+
+    for item in dir_path.iterdir():
+        if item.is_dir():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
 
 
 def collect_files_with_suffix(
