@@ -6,12 +6,14 @@ import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ctypes import ArgumentError
+from os import PathLike
 from pathlib import Path
 from time import time
 from types import FunctionType
 from xml.etree import ElementTree as ET
 
 import cv2
+import geopandas as gpd
 import matplotlib.patches as patches
 import numpy as np
 import pandas as pd
@@ -32,20 +34,6 @@ from tqdm.auto import tqdm, trange
 from ftcnn.io import clear_directory, collect_files_with_suffix, pathify
 from ftcnn.modeling.maskrcnn import collate_fn
 from ftcnn.utils import NUM_CPU, TQDM_INTERVAL, Lock
-
-from ftcnn.utils import (Lock, clear_directory, collect_files_with_suffix,
-                         get_cpu_count, pathify)
-
-
-
-from shapely.geometry import MultiPolygon
-import geopandas as gdp
-from shapely.ops import unary_union
-
-warnings.filterwarnings("ignore", "GeoSeries.notna", UserWarning)
-
-TQDM_INTERVAL = 1 / 100
-
 
 XYPair = tuple[float | int, float | int]
 XYInt = tuple[int, int]
@@ -2170,38 +2158,42 @@ def plot_paired_images(paired_images, nrows=1, ncols=2, figsize=(15, 15)):
     plt.tight_layout()
     plt.show()
 
-def clean_shapeFile(shapeFile):
-    """ 
-    1. Pass the file name to the shapefile that needs to be cleaned.
-    2. Function will great geopandas dataframe
-    3. Function then itereates throught all the polygons checking to see if when buffer
-    is applied they overlap. If they overlap we will combine them by applying union.
-    4. Output is a geopandas dataframe that has combined polygons that should be one.
-    (Note: because buffer is a dialation operation the new polygons are slightly skewed but it can be minimal)
-    """
 
-    
-    gdf = gdp.read_file(shapeFile) #read from shape file and create geopandas dataframe
+def merge_overlapping_geometries(source_shp: PathLike, distance: int = 8):
+    from shapely import MultiPolygon, unary_union
 
-    modified_gdf = gdp.GeoDataFrame(columns=gdf.columns,crs= gdf.crs)#create a new dataframe for output
+    gdf = gpd.read_file(
+        source_shp
+    )  # read from shape file and create geopandas dataframe
 
-    rows =[]
+    modified_gdf = gpd.GeoDataFrame(
+        columns=gdf.columns, crs=gdf.crs
+    )  # create a new dataframe for output
 
-    #iterate checking each polygon with everyother polygon 
+    rows = []
+
+    # iterate checking each polygon with everyother polygon
     for j in range(len(gdf) - 1):
-        ply1 = gdf.iloc[j].geometry  # Add the polygon to the dataframe in case it doesn't get unionized
+        ply1 = gdf.iloc[
+            j
+        ].geometry  # Add the polygon to the dataframe in case it doesn't get unionized
         ply1_attributes = gdf.iloc[j].drop("geometry").to_dict()  # Extract attributes
-        rows.append({**ply1_attributes, "geometry": ply1})  # Add the polygon and attributes
+        rows.append(
+            {**ply1_attributes, "geometry": ply1}
+        )  # Add the polygon and attributes
 
         for i in range(j + 1, len(gdf)):
             ply2 = gdf.iloc[i].geometry
-            ply2_attributes = gdf.iloc[i].drop("geometry").to_dict()  # Extract attributes
+            ply2_attributes = (
+                gdf.iloc[i].drop("geometry").to_dict()
+            )  # Extract attributes
 
-            buffer_distance = 8  # Set buffer distance to dilate the polygons
-            ply1_buf = ply1.buffer(buffer_distance)
-            ply2_buf = ply2.buffer(buffer_distance)
+            ply1_buf = ply1.buffer(distance)
+            ply2_buf = ply2.buffer(distance)
 
-            if ply1_buf.intersects(ply2_buf):  # If the dilated polygons intersect, unionize
+            if ply1_buf.intersects(
+                ply2_buf
+            ):  # If the dilated polygons intersect, unionize
                 result = unary_union([ply2_buf, ply1_buf])
                 minx, miny, maxx, maxy = result.bounds
 
@@ -2210,20 +2202,20 @@ def clean_shapeFile(shapeFile):
                 bbox_w = maxx - minx
                 bbox_h = maxy - miny
 
-                
                 new_row = {**ply1_attributes, **ply2_attributes}
-                new_row.update({
-                    "bbox_x": bbox_x,
-                    "bbox_y": bbox_y,
-                    "bbox_w": bbox_w,
-                    "bbox_h": bbox_h,
-                    "geometry": result
-                })
-
+                new_row.update(
+                    {
+                        "bbox_x": bbox_x,
+                        "bbox_y": bbox_y,
+                        "bbox_w": bbox_w,
+                        "bbox_h": bbox_h,
+                        "geometry": result,
+                    }
+                )
                 rows.append(new_row)
 
     # Create a new GeoDataFrame with the new polygons
-    new_rows_gdf = gdp.GeoDataFrame(rows, crs=gdf.crs)
+    new_rows_gdf = gpd.GeoDataFrame(rows, crs=gdf.crs)
     modified_gdf = pd.concat([modified_gdf, new_rows_gdf], ignore_index=True)
 
     # Clean up smaller polygons that may still be in larger ones
@@ -2236,16 +2228,19 @@ def clean_shapeFile(shapeFile):
             # Find overlapping polygons to retain attributes
             overlapping_rows = modified_gdf[modified_gdf.geometry.intersects(geom)]
             if not overlapping_rows.empty:
-                representative_row = overlapping_rows.iloc[0].to_dict()  # Take attributes of the first match
+                representative_row = overlapping_rows.iloc[
+                    0
+                ].to_dict()  # Take attributes of the first match
                 representative_row["geometry"] = geom
                 unioned_rows.append(representative_row)
     else:
-        representative_row = modified_gdf.iloc[0].to_dict()  # Take attributes of the first row
+        representative_row = modified_gdf.iloc[
+            0
+        ].to_dict()  # Take attributes of the first row
         representative_row["geometry"] = unioned_geometry
         unioned_rows = [representative_row]
 
     # Create a new GeoDataFrame from the unioned geometries
-    final_gdf = gdp.GeoDataFrame(unioned_rows, columns=["geometry"], crs=modified_gdf.crs)
-
-    #return the final modified polygons as a geopandas dataframe
-    return final_gdf  
+    return gpd.GeoDataFrame(
+        unioned_rows, columns=["geometry"], crs=modified_gdf.crs
+    )
