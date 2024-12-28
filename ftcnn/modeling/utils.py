@@ -2189,35 +2189,63 @@ def clean_shapeFile(shapeFile):
 
     #iterate checking each polygon with everyother polygon 
     for j in range(len(gdf) - 1):
-        ply1= gdf.iloc[j].geometry #add the polygon to the dataframe in case it doesnt get unionized
-        rows.append({"geometry": ply1})
-        for i in range(j+1,len(gdf)):
+        ply1 = gdf.iloc[j].geometry  # Add the polygon to the dataframe in case it doesn't get unionized
+        ply1_attributes = gdf.iloc[j].drop("geometry").to_dict()  # Extract attributes
+        rows.append({**ply1_attributes, "geometry": ply1})  # Add the polygon and attributes
+
+        for i in range(j + 1, len(gdf)):
             ply2 = gdf.iloc[i].geometry
+            ply2_attributes = gdf.iloc[i].drop("geometry").to_dict()  # Extract attributes
 
-            buffer_distance = 8 #set buffer distance to dilate the polygons [(8-10) should be the sweet spot]
-
-            ply1_buf = ply1.buffer(buffer_distance) 
+            buffer_distance = 8  # Set buffer distance to dilate the polygons
+            ply1_buf = ply1.buffer(buffer_distance)
             ply2_buf = ply2.buffer(buffer_distance)
 
-            if ply1_buf.intersects(ply2_buf): #if the dialated polygons interesect we combine the with union operation
+            if ply1_buf.intersects(ply2_buf):  # If the dilated polygons intersect, unionize
                 result = unary_union([ply2_buf, ply1_buf])
-                rows.append({"geometry": result})
-           
-            
+                minx, miny, maxx, maxy = result.bounds
 
+                bbox_x = minx
+                bbox_y = miny
+                bbox_w = maxx - minx
+                bbox_h = maxy - miny
 
-    new_rows_gdf = gdp.GeoDataFrame(rows, crs=gdf.crs) #Create a new dataframe with the new polygons 
-    modified_gdf = pd.concat([modified_gdf, new_rows_gdf], ignore_index=True) #add this polygons to the final output
-    unioned_geometry = unary_union(modified_gdf.geometry) #clean up smaller polygons which may still be in larger ones
+                
+                new_row = {**ply1_attributes, **ply2_attributes}
+                new_row.update({
+                    "bbox_x": bbox_x,
+                    "bbox_y": bbox_y,
+                    "bbox_w": bbox_w,
+                    "bbox_h": bbox_h,
+                    "geometry": result
+                })
+
+                rows.append(new_row)
+
+    # Create a new GeoDataFrame with the new polygons
+    new_rows_gdf = gdp.GeoDataFrame(rows, crs=gdf.crs)
+    modified_gdf = pd.concat([modified_gdf, new_rows_gdf], ignore_index=True)
+
+    # Clean up smaller polygons that may still be in larger ones
+    unioned_geometry = unary_union(modified_gdf.geometry)
 
     # If the result is a MultiPolygon, split it back into individual polygons
     if isinstance(unioned_geometry, MultiPolygon):
-        unioned_rows = [{"geometry": geom} for geom in unioned_geometry.geoms]
+        unioned_rows = []
+        for geom in unioned_geometry.geoms:
+            # Find overlapping polygons to retain attributes
+            overlapping_rows = modified_gdf[modified_gdf.geometry.intersects(geom)]
+            if not overlapping_rows.empty:
+                representative_row = overlapping_rows.iloc[0].to_dict()  # Take attributes of the first match
+                representative_row["geometry"] = geom
+                unioned_rows.append(representative_row)
     else:
-        unioned_rows = [{"geometry": unioned_geometry}]
+        representative_row = modified_gdf.iloc[0].to_dict()  # Take attributes of the first row
+        representative_row["geometry"] = unioned_geometry
+        unioned_rows = [representative_row]
 
     # Create a new GeoDataFrame from the unioned geometries
     final_gdf = gdp.GeoDataFrame(unioned_rows, columns=["geometry"], crs=modified_gdf.crs)
 
     #return the final modified polygons as a geopandas dataframe
-    return final_gdf
+    return final_gdf  
