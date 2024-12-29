@@ -5,6 +5,7 @@ import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ctypes import ArgumentError
+from enum import Enum
 from pathlib import Path
 from typing import Callable
 from xml.etree import ElementTree as ET
@@ -28,6 +29,11 @@ from ftcnn.io import collect_files_with_suffix, pathify
 XYPair = tuple[float | int, float | int]
 XYInt = tuple[int, int]
 ClassMap = dict[str, str]
+
+
+class DatasetSplitMode(Enum):
+    All = "all"
+    Collection = "collection"
 
 
 class Serializable:
@@ -169,8 +175,6 @@ class XMLTree:
 
     def root(self):
         return self.tree.getroot()
-
-
 
 
 def copy_split_data(
@@ -591,7 +595,7 @@ def make_dataset(
     image_format=["jpg", "png"],
     label_format="txt",
     split=0.75,
-    mode="all",  # Addtional args: 'collection'
+    mode: DatasetSplitMode | str = DatasetSplitMode.All,  # Addtional args: 'collection'
     shuffle=True,
     recurse=True,
     **kwargs,
@@ -636,9 +640,9 @@ def make_dataset(
             label_path.unlink()
 
     match (mode):
-        case "all":
+        case DatasetSplitMode.All | 'all':
             train_data, val_data = split_dataset(all_paths, split=split)
-        case "collection":
+        case DatasetSplitMode.Collection | "collection":
             train_data, val_data = split_dataset_by_collection(all_paths, split=split)
         case _:
             raise ArgumentError(
@@ -1009,6 +1013,3 @@ def plot_paired_images(paired_images, nrows=1, ncols=2, figsize=(15, 15)):
 
     plt.tight_layout()
     plt.show()
-
-
-

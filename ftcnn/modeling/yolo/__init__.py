@@ -1,6 +1,7 @@
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from glob import glob
+from os import PathLike
 from pathlib import Path
 from time import time
 
@@ -18,8 +19,8 @@ from tqdm.auto import trange
 from ftcnn.io import clear_directory
 from ftcnn.modeling import maskrcnn
 from ftcnn.modeling.maskrcnn import collate_fn
-from ftcnn.modeling.utils import (AnnotatedLabel, BBox, ImageData,
-                                  Serializable, XYPair,
+from ftcnn.modeling.utils import (AnnotatedLabel, BBox, DatasetSplitMode,
+                                  ImageData, Serializable, XYPair,
                                   convert_segment_to_bbox,
                                   copy_images_and_labels,
                                   display_image_and_annotations, make_dataset,
@@ -362,7 +363,7 @@ class YOLODatasetBase(Serializable):
 
         return self
 
-    def to_csv(self, output_path: str | Path, **kwargs):
+    def to_csv(self, output_path: PathLike, **kwargs):
         """Saves the dataset to a CSV file
 
         Parameters
@@ -375,7 +376,7 @@ class YOLODatasetBase(Serializable):
         self.data_frame.to_csv(output_path, index=False, **kwargs)
 
     @staticmethod
-    def from_csv(path: str | Path, **kwargs):
+    def from_csv(path: PathLike, **kwargs):
         """Constructs and returns a YOLODataset from a CSV file.
 
         The dataset is required to have the following columns in any order:
@@ -445,7 +446,7 @@ class YOLODatasetBase(Serializable):
 
     def generate_label_files(
         self,
-        dest_path: str | Path,
+        dest_path: PathLike,
         *,
         clear_dir: bool = False,
         overwrite_existing: bool = False,
@@ -566,12 +567,12 @@ class YOLODatasetBase(Serializable):
 
     def generate_yaml_file(
         self,
-        root_abs_path: str | Path,
-        dest_abs_path: str | Path | None = None,
+        root_abs_path: PathLike,
+        dest_abs_path: PathLike | None = None,
         *,
         filename: str = "data.yaml",
-        train_path: str | Path = "images/train",
-        val_path: str | Path = "images/val",
+        train_path: PathLike | str = "images/train",
+        val_path: PathLike | str = "images/val",
     ):
         """Generates and saves the YAML data file used by YOLO
 
@@ -596,32 +597,38 @@ class YOLODatasetBase(Serializable):
         if dest_abs_path is None:
             dest_abs_path = root_abs_path
 
-        root_abs_path = root_abs_path
-        dest_abs_path = Path(dest_abs_path, filename).resolve()
+        root_abs_path = Path(root_abs_path)
+        dest_abs_path = Path(dest_abs_path).resolve()
+        dest_abs_path.mkdir(parents=True, exist_ok=True)
+        data_yaml_path = dest_abs_path / filename
 
-        with open(dest_abs_path, "w") as f:
-            f.write(f"path: {root_abs_path}\n")
+        with open(data_yaml_path, "w") as f:
+            f.write(f"path: {str(root_abs_path)}\n")
             f.write(f"train: {train_path}\n")
             f.write(f"val: {val_path}\n")
             f.write("names:\n")
             for name, id in self.class_map.items():
                 if name.lower() != "background":
                     f.write(f"  {id}: {name}\n")
-        self.root_path = Path(root_abs_path)
+        self.root_path = root_abs_path
+        self.data_yaml_path = dest_abs_path / filename
 
     def split_data(
         self,
-        images_dir,
-        labels_dir,
+        images_dir: PathLike,
+        labels_dir: PathLike,
         *,
-        split=0.7,
-        shuffle=True,
-        recurse=True,
-        save=True,
-        mode="all",
-        background_bias=None,
+        split: float = 0.7,
+        shuffle: bool = True,
+        recurse: bool = True,
+        save: bool = True,
+        mode: DatasetSplitMode | str = DatasetSplitMode.All,
+        background_bias: None | float = None,
         **kwargs,
-    ):
+    ) -> tuple[
+        tuple[list[ImageData], list[AnnotatedLabel]],
+        tuple[list[ImageData], list[AnnotatedLabel]],
+    ]:
 
         train_ds, val_ds = make_dataset(
             images_dir,
@@ -632,6 +639,8 @@ class YOLODatasetBase(Serializable):
             recurse=recurse,
             **kwargs,
         )
+        if split > 0.5 and len(train_ds[0]) < len(val_ds[0]):
+            train_ds, val_ds = val_ds, train_ds
 
         for train_image in train_ds[0]:
             name = str(train_image.filename)
@@ -728,7 +737,6 @@ class YOLODatasetBase(Serializable):
             )
         )
         self.data_frame = self.data_frame.sort_values(by="type", ignore_index=True)
-
         self.images = train_ds[0] + val_ds[0]
         self.labels = train_ds[1] + val_ds[1]
 
