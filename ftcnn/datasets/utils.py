@@ -15,7 +15,7 @@ def init_dataset_filepaths(
     save_csv: bool = True,
     save_shp: bool = True,
     save_gpkg: bool = True,
-    clean_dest: bool,
+    clean_dest: bool = False,
     exist_ok: bool = False,
 ) -> dict[str, Path]:
     source_shp, images_dir, output_dir = (
@@ -37,16 +37,16 @@ def init_dataset_filepaths(
     if save_shp or save_gpkg:
         shp_dir.mkdir(parents=True, exist_ok=exist_ok)
 
-    tiles_dir: Path = output_dir / "images" / "tiles"
+    tiles_dir: Path = images_dir / "tiles"
     tiles_dir.mkdir(parents=True, exist_ok=exist_ok)
     return {
-        "source_shp": source_shp,
-        "images_dir": images_dir,
-        "output_dir": output_dir,
-        "meta_dir": meta_dir,
-        "csv_dir": csv_dir,
-        "shp_dir": shp_dir,
-        "tiles_dir": tiles_dir,
+        "source_shp": Path(source_shp),
+        "output_dir": Path(output_dir),
+        "images_dir": Path(images_dir),
+        "tiles_dir": Path(tiles_dir),
+        "meta_dir": Path(meta_dir),
+        "csv_dir": Path(csv_dir),
+        "shp_dir": Path(shp_dir),
     }
 
 

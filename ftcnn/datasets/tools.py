@@ -207,15 +207,15 @@ def make_ndvi_difference_dataset(
     geom_col: str = "geometry",
     tile_size: int | tuple[int, int] | None = None,
     clean_dest: bool = False,
-    xy_to_index: bool = True,
+    translate_xy: bool = True,
     exist_ok: bool = False,
     save_csv: bool = False,
     save_shp: bool = False,
     save_gpkg: bool = False,
-    tif_to_png: bool = True,
+    convert_to_png: bool = True,
     pbar_leave: bool = True,
     num_workers: int | None = None,
-) -> tuple[gpd.GeoDataFrame, tuple[Path, Path, Path]]:
+) -> tuple[str, gpd.GeoDataFrame]:
     """
     Creates an NDVI difference dataset by processing a shapefile and the associated NDVI image files.
 
@@ -229,12 +229,12 @@ def make_ndvi_difference_dataset(
         geom_col (str, optional): The column containing geometry data in the GeoDataFrame. Defaults to 'geometry'.
         tile_size (int | tuple[int, int] | None, optional): The size of the tiles. Defaults to None (default tile size).
         clean_dest (bool, optional): Whether to clean the destination directory before saving. Defaults to False.
-        xy_to_index (bool, optional): Whether to convert the coordinates to an index. Defaults to True.
+        translate_xy (bool, optional): Whether to convert the coordinates to an index. Defaults to True.
         exist_ok (bool, optional): Whether to overwrite existing files. Defaults to False.
         save_csv (bool, optional): Whether to save the dataset as a CSV file. Defaults to False.
         save_shp (bool, optional): Whether to save the dataset as a shapefile. Defaults to False.
         save_gpkg (bool, optional): Whether to save the dataset as a geopackage. Defaults to False.
-        tif_to_png (bool, optional): Whether to convert GeoTIFF files to PNG format. Defaults to True.
+        convert_to_png (bool, optional): Whether to convert GeoTIFF files to PNG format. Defaults to True.
         pbar_leave (bool, optional): Whether to leave the progress bar after completion. Defaults to True.
         num_workers (int | None, optional): The number of worker threads to use. Defaults to None (auto-detect).
 
@@ -256,17 +256,16 @@ def make_ndvi_difference_dataset(
         save_gpkg=save_gpkg,
         clean_dest=clean_dest,
     )
-    source_shp = filepaths.get("source_shp")
-    images_dir = filepaths.get("images_dir")
-    output_dir = filepaths.get("output_dir")
-    meta_dir = filepaths.get("meta_dir")
-    csv_dir = filepaths.get("csv_dir")
-    shp_dir = filepaths.get("shp_dir")
-    tiles_dir = filepaths.get("tiles_dir")
+    source_shp = filepaths["source_shp"]
+    output_dir = filepaths["output_dir"]
+    images_dir = filepaths["images_dir"]
+    tiles_dir = filepaths["tiles_dir"]
+    csv_dir = filepaths["csv_dir"]
+    shp_dir = filepaths["shp_dir"]
 
     n_calls = 4
-    n_calls += 1 if xy_to_index else 0
-    n_calls += 1 if tif_to_png else 0
+    n_calls += 1 if translate_xy else 0
+    n_calls += 1 if convert_to_png else 0
 
     pbar = trange(
         n_calls,
@@ -285,22 +284,22 @@ def make_ndvi_difference_dataset(
     start_year_col = "start_year"
     end_year_col = "end_year"
 
-    output_fname = source_shp.stem
+    ds_name = source_shp.stem
     if years is not None:
-        output_fname += f"_{years[0]}to{years[1]}"
-    output_fname = Path(output_fname)
+        ds_name += f"_{years[0]}to{years[1]}"
+    ds_name = Path(ds_name)
 
     if save_csv:
-        save_as_csv(gdf, csv_dir / output_fname.with_suffix(".csv"))
+        save_as_csv(gdf, csv_dir / ds_name.with_suffix(".csv"))
     if save_shp:
         save_as_shp(
             gdf,
-            shp_dir / output_fname.with_suffix(".shp"),
+            shp_dir / ds_name.with_suffix(".shp"),
         )
     if save_gpkg:
         save_as_gpkg(
             gdf,
-            shp_dir / output_fname.with_suffix(".gpkg"),
+            shp_dir / ds_name.with_suffix(".gpkg"),
         )
 
     pbar.update()
@@ -322,43 +321,43 @@ def make_ndvi_difference_dataset(
     pbar.update()
 
     if save_csv or save_shp:
-        output_fname = Path(f"{output_fname}_tiles_xy")
+        ds_name = Path(f"{ds_name}_tiles_xy")
         if save_csv:
-            save_as_csv(gdf, csv_dir / output_fname.with_suffix(".csv"))
+            save_as_csv(gdf, csv_dir / ds_name.with_suffix(".csv"))
         if save_shp:
             save_as_shp(
                 gdf,
-                shp_dir / output_fname.with_suffix(".shp"),
+                shp_dir / ds_name.with_suffix(".shp"),
             )
         if save_gpkg:
             save_as_gpkg(
                 gdf,
-                shp_dir / output_fname.with_suffix(".gpkg"),
+                shp_dir / ds_name.with_suffix(".gpkg"),
             )
 
-    if xy_to_index:
+    if translate_xy:
         pbar.update()
         pbar.set_description("Creating NDVI dataset - Translating xy coords to index")
 
         gdf = translate_xy_coords_to_index(gdf)
         if save_csv or save_shp:
-            output_fname = str(output_fname).replace("_xy", "_indexed")
-            if not output_fname.endswith("_indexed"):
-                output_fname += "_indexed"
-            output_fname = Path(output_fname)
+            ds_name = str(ds_name).replace("_xy", "_indexed")
+            if not ds_name.endswith("_indexed"):
+                ds_name += "_indexed"
+            ds_name = Path(ds_name)
             if save_csv:
-                save_as_csv(gdf, csv_dir / output_fname.with_suffix(".csv"))
+                save_as_csv(gdf, csv_dir / ds_name.with_suffix(".csv"))
             if save_shp:
                 save_as_shp(
                     gdf,
-                    shp_dir / output_fname.with_suffix(".shp"),
+                    shp_dir / ds_name.with_suffix(".shp"),
                 )
             if save_gpkg:
                 save_as_gpkg(
                     gdf,
-                    shp_dir / output_fname.with_suffix(".gpkg"),
+                    shp_dir / ds_name.with_suffix(".gpkg"),
                 )
-    if tif_to_png:
+    if convert_to_png:
         pbar.update()
         pbar.set_description("Creating NDVI dataset - Converting GeoTIFFs to PNGs")
 
@@ -375,21 +374,21 @@ def make_ndvi_difference_dataset(
             spbar.update()
         spbar.close()
         if save_csv or save_shp:
-            output_fname = Path(f"{output_fname}_as_png")
+            ds_name = Path(f"{ds_name}_as_png")
             if save_csv:
-                save_as_csv(gdf, csv_dir / output_fname.with_suffix(".csv"))
+                save_as_csv(gdf, csv_dir / ds_name.with_suffix(".csv"))
             if save_shp:
                 save_as_shp(
                     gdf,
-                    shp_dir / output_fname.with_suffix(".shp"),
+                    shp_dir / ds_name.with_suffix(".shp"),
                 )
             if save_gpkg:
                 save_as_gpkg(
                     gdf,
-                    shp_dir / output_fname.with_suffix(".gpkg"),
+                    shp_dir / ds_name.with_suffix(".gpkg"),
                 )
     pbar.update()
     pbar.set_description("Creating NDVI dataset - Complete")
     pbar.close()
 
-    return gdf, (meta_dir, tiles_dir, output_fname)
+    return str(ds_name), gdf
