@@ -7,8 +7,8 @@ TQDM_INTERVAL = 1 / 100
 FTCNN_TMP_DIR = Path("/tmp", "ftcnn")
 NUM_CPU = cpu_count()
 
-__all__ = [
-    "Lock"
-]
+FTCNN_TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+__all__ = ["Lock"]
 
 _WRITE_LOCK = Lock()
