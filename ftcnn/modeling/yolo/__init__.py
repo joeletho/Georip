@@ -279,7 +279,7 @@ class YOLODatasetBase(Serializable):
                         imgsize=image_data.shape, bbox=label.bbox
                     )
 
-                if label.segments is not None:
+                if label.segments is not None and len(label.segments) > 0:
                     for seg in label.segments:
                         if float(seg) <= 1:
                             continue
@@ -310,10 +310,14 @@ class YOLODatasetBase(Serializable):
                 data["width"].append(image_data.shape[0])
                 data["height"].append(image_data.shape[1])
                 data["path"].append(image_data.filepath)
-                data["bbox_x"].append(label.bbox.x)
-                data["bbox_y"].append(label.bbox.y)
-                data["bbox_w"].append(label.bbox.width)
-                data["bbox_h"].append(label.bbox.height)
+                data["bbox_x"].append(label.bbox.x if label.bbox.x != -1 else "")
+                data["bbox_y"].append(label.bbox.y if label.bbox.y != -1 else "")
+                data["bbox_w"].append(
+                    label.bbox.width if label.bbox.width != -1 else ""
+                )
+                data["bbox_h"].append(
+                    label.bbox.height if label.bbox.height != -1 else ""
+                )
                 data["segments"].append(
                     " ".join([str(point) for point in label.segments]),
                 )
