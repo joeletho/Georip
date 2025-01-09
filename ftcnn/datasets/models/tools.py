@@ -1,5 +1,4 @@
-import random
-from datetime import datetime
+import time
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +7,12 @@ import pandas as pd
 from tqdm.auto import trange
 
 from ftcnn.datasets.tools import make_ndvi_difference_dataset
+from ftcnn.datasets.utils import (
+    TMP_FILE_PREFIX,
+    gdf_ndvi_validate_years_as_ints,
+    postprocess_geo_source,
+    preprocess_geo_source,
+)
 from ftcnn.geospacial.utils import encode_classes
 from ftcnn.io import save_as_csv, save_as_gpkg, save_as_shp
 from ftcnn.utils import FTCNN_TMP_DIR
@@ -15,18 +20,19 @@ from ftcnn.utils import FTCNN_TMP_DIR
 
 def build_ndvi_difference_dataset(config: dict[str, Any]):
     source = config["source"]
-    images_dir = config["images_dir"]
+    source_images_dir = config["source_images_dir"]
     root_dir = config["root_dir"]
+    region_column = config["region_column"]
     year_start_column = config["year_start_column"]
     year_end_column = config["year_end_column"]
     geometry_column = config["geometry_column"]
     years = config["years"]
     background = config["background"]
     background_ratio = config["background_ratio"]
-    shuffle_background = config["shuffle_background"]
     tile_size = config["tile_size"]
     translate_xy = config["translate_xy"]
     class_encoder = config["class_encoder"]
+    background_filter = config["background_filter"]
     exist_ok = config["exist_ok"]
     clear_output_dir = config["clear_output_dir"]
     save_shp = config["save_shp"]
@@ -35,33 +41,47 @@ def build_ndvi_difference_dataset(config: dict[str, Any]):
     pbar_leave = config["pbar_leave"]
     convert_to_png = config["convert_to_png"]
     num_workers = config["num_workers"]
+    preserve_fields = config["preserve_fields"]
 
-    if isinstance(source, pd.DataFrame) or isinstance(source, gpd.GeoDataFrame):
-        if isinstance(source, pd.DataFrame):
-            source = gpd.GeoDataFrame(source)
-        tmp_path = FTCNN_TMP_DIR / f"ndvi_difference_dataset_{datetime.now()}.shp"
-        save_as_shp(source, tmp_path)
-        source = tmp_path
-
-    total_updates = 4
+    total_updates = 3
     pbar = trange(
         total_updates,
         desc="Creating NDVI Difference dataset",
         leave=pbar_leave,
     )
+    timestamp = f"{time.time()}"
+    timestamp = timestamp[: timestamp.find(".")]
 
-    # TODO: process background images/geometry here. Need to handle:
-    #   1. `background` is None or False, indicating only return images with valid geometry (no background)
-    #   2. `background` is a shapefile, which means:
-    #       a) `background` may contain geometry, or
-    #       b) `background` can be any row with an `geotiff_filename_column` column as background
-    #   3. `background` is a dataframe, so we can query the filename in `geotiff_filename_column` column
+    source_path = source
+    if isinstance(source, pd.DataFrame) or isinstance(source, gpd.GeoDataFrame):
+        gdf_ndvi_validate_years_as_ints(
+            source,
+            start_year_column=year_start_column,
+            end_year_column=year_end_column,
+        )
+
+        if isinstance(source, pd.DataFrame):
+            source = gpd.GeoDataFrame(source)
+        source_path = (
+            FTCNN_TMP_DIR / f"{TMP_FILE_PREFIX}ndvi_difference_dataset_{timestamp}.shp"
+        )
+        save_as_shp(source, source_path)
+
+    source_path = preprocess_geo_source(source_path, geometry_column)
+    if not isinstance(region_column, list):
+        region_column = [region_column]
+
+    if preserve_fields is None:
+        preserve_fields = [*region_column]
+    else:
+        preserve_fields.extend(region_column)
 
     ds_name, gdf = make_ndvi_difference_dataset(
-        source,
-        images_dir,
+        source_path,
+        source_images_dir,
         root_dir,
         years=years,
+        region_col=region_column,
         start_year_col=year_start_column,
         end_year_col=year_end_column,
         geom_col=geometry_column,
@@ -75,55 +95,50 @@ def build_ndvi_difference_dataset(config: dict[str, Any]):
         convert_to_png=convert_to_png,
         pbar_leave=pbar_leave,
         num_workers=num_workers,
+        preserve_fields=preserve_fields,
     )
 
-    pbar.set_description("Creating NDVI Difference dataset - Encoding classes")
+    postprocess_geo_source(source_path)
+
     pbar.update()
 
     gdf = encode_classes(gdf, class_encoder)
 
-    pbar.set_description("Creating NDVI Difference dataset - Filtering background")
-    pbar.update()
+    if background:
+        if not callable(background_filter):
+            raise ValueError(
+                "`background_filter` must be a callable function when `background` is True."
+            )
 
-    labeled_images = gdf.loc[gdf["class_id"] != -1].values.tolist()
+        background_gdf = gdf.iloc[gdf.apply(background_filter, axis=1)]
+        truth_gdf = gdf.drop(index=background_gdf.index)
 
-    if background is None:
-        new_rows = labeled_images
-    else:
-        background_images = gdf.loc[gdf["class_id"] == -1].values.tolist()
-        if shuffle_background:
-            random.shuffle(background_images)
-        background_images = background_images[
-            : int(len(labeled_images) * background_ratio)
-        ]
-
-        new_rows = labeled_images + background_images
+        sample_size = int(len(truth_gdf) * background_ratio)
+        background_gdf = background_gdf.sample(n=sample_size)
         print(
-            "Number of labeled images",
-            len(labeled_images),
-            "\nNumber of background images",
-            len(background_images),
+            f"Number of labeled images: {len(truth_gdf)}\n"
+            f"Number of background images: {len(background_gdf)}"
         )
+        gdf = gpd.GeoDataFrame(pd.concat([truth_gdf, background_gdf]), crs=gdf.crs)
 
     pbar.set_description("Creating NDVI Difference dataset - Finishing up")
     pbar.update()
 
-    gdf = gpd.GeoDataFrame(new_rows, columns=gdf.columns, crs=gdf.crs)
-
     if save_csv or save_shp:
         meta_dir = config["meta_dir"]
+        dir_name = source_path.stem.replace(TMP_FILE_PREFIX, "")
         ds_name = Path(f"{ds_name}_encoded")
         if save_csv:
-            save_as_csv(gdf, meta_dir / "csv" / ds_name.with_suffix(".csv"))
+            save_as_csv(gdf, meta_dir / "csv" / dir_name / ds_name.with_suffix(".csv"))
         if save_shp:
             save_as_shp(
                 gdf,
-                meta_dir / "shp" / ds_name.with_suffix(".shp"),
+                meta_dir / "shp" / dir_name / ds_name.with_suffix(".shp"),
             )
         if save_gpkg:
             save_as_gpkg(
                 gdf,
-                meta_dir / "shp" / ds_name.with_suffix(".gpkg"),
+                meta_dir / "shp" / dir_name / ds_name.with_suffix(".gpkg"),
             )
     pbar.update()
     pbar.close()

@@ -288,7 +288,6 @@ def recategorize_classes(
             f.seek(0)
             f.write("{}\n".format("\n".join(line for line in lines)))
 
-    print(old_new_map)
     new_classes = {}
     for old, new in old_new_map.items():
         name = classes.get(str(old))

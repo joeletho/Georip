@@ -37,19 +37,20 @@ class YOLONDVIDifferenceDataset(YOLODatasetBase):
     @staticmethod
     def create(
         source: PathLike | DataFrameLike,
-        images_dir: PathLike,
+        source_images_dir: PathLike,
         output_dir: PathLike,
         *,
-        year_start_column: str = "start_year",
-        year_end_column: str = "end_year",
+        region_column: str,
+        year_start_column: str,
+        year_end_column: str,
         geometry_column: str = "geometry",
         years: None | tuple[int, int] = None,
-        background: None | PathLike | DataFrameLike | bool = None,
+        background: bool = False,
         background_ratio: float = 1.0,
+        background_filter: Callable | None = None,
         split: DatasetSplitMode = DatasetSplitMode.All,
         split_ratio: float = 0.7,  # 0.7 (70/30)
         shuffle_split: bool = True,  # True/False
-        shuffle_background: bool = True,  # True/False
         generate_labels: bool = True,
         generate_train_data: bool = True,  # True/False
         tile_size: None | int | tuple[int, int] = 640,
@@ -64,27 +65,31 @@ class YOLONDVIDifferenceDataset(YOLODatasetBase):
         convert_to_png: bool = True,
         use_segments: bool = True,
         num_workers: int = 8,
+        preserve_fields: list[str | dict[str, str]] | None = None,
     ):
         root_dir = Path(output_dir)
-        images_dir = Path(images_dir)
-        labels_dir = images_dir.parent / "labels"
+        source_images_dir = Path(source_images_dir)
+        images_dir = root_dir / "images"
+        labels_dir = root_dir / "labels"
         config = {
             "source": source,
             "root_dir": root_dir,
             "config_dir": root_dir / "config",
+            "source_images_dir": source_images_dir,
             "images_dir": images_dir,
-            "labels_dir": labels_dir / "labels",
+            "labels_dir": labels_dir,
             "meta_dir": root_dir / "meta",
+            "region_column": region_column,
             "year_start_column": year_start_column,
             "year_end_column": year_end_column,
             "geometry_column": geometry_column,
             "years": years,
             "background": background,
             "background_ratio": background_ratio,
+            "background_filter": background_filter,
             "split": split,
             "split_ratio": split_ratio,
             "shuffle_split": shuffle_split,
-            "shuffle_background": shuffle_background,
             "generate_labels": generate_labels,
             "generate_train_data": generate_train_data,
             "tile_size": tile_size,
@@ -99,5 +104,6 @@ class YOLONDVIDifferenceDataset(YOLODatasetBase):
             "convert_to_png": convert_to_png,
             "use_segments": use_segments,
             "num_workers": num_workers,
+            "preserve_fields": preserve_fields,
         }
         return create_ndvi_difference_dataset(YOLONDVIDifferenceDataset, config)

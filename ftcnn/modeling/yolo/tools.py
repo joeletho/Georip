@@ -136,7 +136,6 @@ def make_dataset(
         )
     pbar = trange(1, desc="Preparing labels and classes")
     classes = [str(id) for id in list(class_map.keys())]
-    print(classes)
     remove_annotations_not_in(classes, labels_dir=labels_dir)
 
     pbar.update()

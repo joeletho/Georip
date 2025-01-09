@@ -1,10 +1,12 @@
 import os
+from datetime import datetime
 
 import geopandas as gpd
 import pandas as pd
 from PIL import Image
 from tqdm.auto import tqdm, trange
 
+from ftcnn.datasets.utils import TMP_FILE_PREFIX
 from ftcnn.geometry import stringify_points
 from ftcnn.modeling.utils import (
     AnnotatedLabel,
@@ -14,7 +16,7 @@ from ftcnn.modeling.utils import (
     parse_labels_from_dataframe,
 )
 from ftcnn.modeling.yolo import YOLODatasetBase
-from ftcnn.utils import NUM_CPU
+from ftcnn.utils import FTCNN_TMP_DIR, NUM_CPU
 
 
 def geodataframe_to_yolo(gdf: gpd.GeoDataFrame, compile=True) -> YOLODatasetBase:
@@ -29,13 +31,13 @@ def geodataframe_to_yolo(gdf: gpd.GeoDataFrame, compile=True) -> YOLODatasetBase
         YOLODataset: The resulting YOLO dataset.
 
     Example:
-        yolo_ds = to_yolo(gdf)
+        yolo_ds = geodataframe_to_yolo(gdf)
     """
     gdf = gdf.copy()
     gdf["geometry"] = gdf["geometry"].apply(
         lambda x: stringify_points(x.exterior.coords)
     )
-    tmp_path = "/tmp/ftcnn_yolo_ds.csv"
+    tmp_path = FTCNN_TMP_DIR / f"{TMP_FILE_PREFIX}yolo_ds_{datetime.now()}.csv"
     gdf.to_csv(tmp_path)
     try:
         ds = YOLODatasetBase.from_csv(

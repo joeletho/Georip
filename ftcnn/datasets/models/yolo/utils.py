@@ -1,5 +1,3 @@
-from typing import Any
-
 from tqdm.auto import trange
 
 from ftcnn.datasets.models.tools import build_ndvi_difference_dataset
