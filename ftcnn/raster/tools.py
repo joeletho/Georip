@@ -2,11 +2,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from os import PathLike
 from pathlib import Path
 from time import time
+from typing import Callable
 
 import numpy as np
 import rasterio
 from tqdm.auto import trange
 
+from ftcnn.geometry.polygons import create_tile_polygon
 from ftcnn.io import clear_directory, collect_files_with_suffix
 from ftcnn.raster.utils import get_rows_cols_min_max_bounds
 from ftcnn.utils import _WRITE_LOCK, NUM_CPU, TQDM_INTERVAL
@@ -126,6 +128,7 @@ def create_raster_tiles(
     output_dir: PathLike | None = None,
     exist_ok: bool = False,
     leave: bool = False,
+    filter_geometry: Callable | None = None,
 ) -> list[np.ndarray]:
     """
     Creates raster tiles from a source raster and saves them to disk (or returns them as arrays).
@@ -178,6 +181,17 @@ def create_raster_tiles(
                     min(width, cmax - col),
                     min(height, rmax - row),
                 )
+
+                if filter_geometry:
+                    window_bbox = create_tile_polygon(src, tile_window)
+                    keep_geom = filter_geometry(source_path, window_bbox)
+                    if not isinstance(keep_geom, bool):
+                        raise ValueError(
+                            "'filter_geometry' callback return expects a True or False"
+                        )
+                    if not keep_geom:
+                        continue
+
                 bands = (
                     1 if src.count == 1 else [band for band in range(1, src.count + 1)]
                 )
@@ -193,6 +207,7 @@ def create_raster_tiles(
                     continue
 
                 tile_transform = src.window_transform(tile_window)
+
                 lock_id = _WRITE_LOCK.acquire()
                 tiles.append(
                     (

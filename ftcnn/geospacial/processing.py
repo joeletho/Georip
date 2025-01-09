@@ -1,4 +1,5 @@
 from os import PathLike
+from typing import Union
 
 import geopandas as gpd
 
@@ -7,43 +8,59 @@ from ftcnn.geospacial.mapping import map_metadata
 from ftcnn.io.geospacial import load_shapefile
 
 
-def preprocess_shapefile(
+def preprocess_ndvi_shapefile(
     source_path: PathLike,
+    *,
+    years: None | tuple[int, int],
+    region_col: str | list[str],
     start_year_col: str,
     end_year_col: str,
     images_dir: PathLike,
+    preserve_fields: Union[
+        list[Union[str, dict[str, str]]],
+        dict[str, str],
+        None,
+    ] = None,
 ) -> gpd.GeoDataFrame:
     """
     Preprocesses a shapefile by flattening polygons, removing duplicates, and mapping metadata.
 
     Parameters:
-        shpfile (PathLike): The path to the input shapefile to be processed.
+        source_path (PathLike): The path to the input shapefile to be processed.
+        years (tuple[int, int] | None): A tuple indicating the start and end year for filtering rows. If None, no filtering is applied.
+        region_col (str): The column name representing the region in the shapefile.
         start_year_col (str): The column name representing the start year in the shapefile.
         end_year_col (str): The column name representing the end year in the shapefile.
-        img_dir (PathLike): The directory containing image data for metadata mapping.
+        images_dir (PathLike): The directory containing image data for metadata mapping.
+        filter_geometry (bool): Whether to filter out empty geometries.
+        preserve_fields (list | dict | None): Fields to preserve, either as a list of strings/dictionaries
+                                              or a dictionary mapping input to output names.
 
     Returns:
         gpd.GeoDataFrame: A processed GeoDataFrame with flattened polygons, unique geometries,
                           and mapped metadata.
     """
-    # Load the shapefile into a GeoDataFrame.
     gdf = load_shapefile(source_path)
-    crs = gdf.crs  # Store the original Coordinate Reference System (CRS).
 
-    # Flatten polygons by grouping based on the start and end year columns.
-    gdf = flatten_polygons(gdf, group_by=[start_year_col, end_year_col])
+    # If years are provided, filter the rows based on the start and end years.
+    if years is not None:
+        start_year, end_year = years
+        start_year = int(start_year)
+        end_year = int(end_year)
+        gdf = gdf[(gdf[start_year_col] >= start_year) & (gdf[end_year_col] <= end_year)]
 
-    # Remove duplicate geometries and records.
-    gdf = gpd.GeoDataFrame(gdf.drop_duplicates())
+    gdf = flatten_polygons(gdf, group_by=[*region_col, start_year_col, end_year_col])
 
-    # Map metadata to the GeoDataFrame, preserving specific fields for start and end years.
     gdf = map_metadata(
         gdf,
         images_dir=images_dir,
-        preserve_fields={"start_year": start_year_col, "end_year": end_year_col},
+        region_column=region_col,
+        start_year_column=start_year_col,
+        end_year_column=end_year_col,
+        preserve_fields=preserve_fields,
     )
+
     if not len(gdf):
         raise ValueError("Shapefile does not contain valid metadata")
 
-    # Remove any additional duplicates after metadata mapping.
-    return gpd.GeoDataFrame(gdf.drop_duplicates(), crs=crs)
+    return gdf

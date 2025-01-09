@@ -1,24 +1,51 @@
-import os
+import sys
 from os import PathLike
 from pathlib import Path
-from typing import Callable, Union
+from typing import Union
 
 import geopandas as gpd
+import pandas as pd
 import rasterio
+import shapely
 from PIL import Image
 from shapely.geometry import Polygon
 from tqdm.auto import tqdm
 
 from ftcnn.geometry.polygons import create_tile_polygon
-from ftcnn.geospacial.utils import parse_filename
+from ftcnn.geospacial.utils import stem_contains_region_and_years, stem_contains_years
 from ftcnn.io import collect_files_with_suffix
-from ftcnn.raster import create_window, open_raster
+from ftcnn.raster import create_window
+from ftcnn.raster.utils import get_rows_cols_min_max_bounds
+from ftcnn.utils.pandas import extract_fields, normalize_fields
+
+
+def update_metadata_region_name_and_years(
+    metadata,
+    region_column,
+    start_year_column,
+    end_year_column,
+    region_name,
+    start_year,
+    end_year,
+):
+    for region in region_column:
+        if not metadata.get(region):
+            metadata[region] = region_name
+
+    resolved_start_year_column = metadata.get(start_year_column, "start_year")
+    resolved_end_year_column = metadata.get(end_year_column, "end_year")
+    if not metadata.get(resolved_start_year_column):
+        metadata[resolved_start_year_column] = start_year
+    if not metadata.get(resolved_end_year_column):
+        metadata[resolved_end_year_column] = end_year
 
 
 def map_metadata(
     gdf_src: gpd.GeoDataFrame,
     images_dir: PathLike,
-    parse_filename: Callable = parse_filename,
+    region_column: str | list[str],
+    start_year_column: str,
+    end_year_column: str,
     preserve_fields: (
         Union[list[Union[str, dict[str, str]]], dict[str, str]] | None
     ) = None,
@@ -45,127 +72,174 @@ def map_metadata(
         KeyError: If any column to preserve does not exist in the original DataFrame.
     """
     images_dir = Path(images_dir).resolve()
-    columns = ["filename", "path", "width", "height", "bbox"]
+    rows = []
+    geometry = []
+    gdf = gdf_src.copy()
+
+    image_paths = collect_files_with_suffix(
+        [".tif", ".tiff", ".jpg", ".jpeg", ".png"], images_dir, recurse=True
+    )
+    if not len(image_paths):
+        raise FileNotFoundError(
+            f"Could not find images of type '.tif' or '.tiff' in {images_dir}"
+        )
+
+    if not isinstance(region_column, list):
+        region_column = [region_column]
+
+    image_paths.sort(key=lambda p: p.stem)
+    gdf = gdf.sort_values(by=region_column).reset_index(drop=True)
     rows = []
     geometry = []
 
-    # Normalize preserve_fields to a single dictionary
-    field_map = {}
+    field_map = dict()
     if preserve_fields:
-        if isinstance(preserve_fields, dict):
-            field_map = preserve_fields
-        elif isinstance(preserve_fields, list):
-            for item in preserve_fields:
-                if isinstance(item, str):
-                    field_map[item] = item  # Preserve as-is
-                elif isinstance(item, dict):
-                    field_map.update(item)  # Add renaming mappings
-    if len(field_map):
-        columns.extend(field_map.keys())
+        field_map = normalize_fields(preserve_fields)
 
-    for _, row in gdf_src.iterrows():
-        filename = parse_filename(row)
-        path = images_dir / filename
+    for filepath in image_paths:
+        path_stem = filepath.stem
+        metadata = {
+            "filename": filepath.name,
+            "path": str(filepath),
+            "width": None,
+            "height": None,
+            "bbox": None,
+        }
 
-        if path.exists():
-            # Skip duplicate paths
-            if any(r["path"] == path for r in rows):
-                continue
+        region_name = None
+        start_year = None
+        end_year = None
 
-            suffix = path.suffix
-            open_fn = open_raster if suffix in [".tiff", ".tif"] else Image.open
+        row_indices = None
+        for _, row in gdf.iterrows():
+            start_year = row.get(start_year_column)
+            start_year = int(start_year) if start_year else None
+            end_year = row.get(end_year_column)
+            end_year = int(end_year) if end_year else None
 
-            with open_fn(path) as img:
-                # Handle width and height based on image type
-                width, height = (
-                    img.size
-                    if isinstance(img, Image.Image)
-                    else (img.shape[1], img.shape[0])
-                )
+            for region in region_column:
+                region_name = row.get(region)
+                if region_name is None:
+                    continue
 
-                # Base metadata
-                metadata = {
-                    "filename": filename,
-                    "path": str(path),
-                    "width": width,
-                    "height": height,
-                    "bbox": row.get("bbox", None),
-                }
+                if stem_contains_region_and_years(
+                    path_stem, str(region_name), str(start_year), str(end_year)
+                ):
+                    years_mask = (gdf[start_year_column] == start_year) & (
+                        gdf[end_year_column] == end_year
+                    )
 
-                # Add preserved fields with existence check
-                for new_col, old_col in field_map.items():
-                    if old_col not in row:
-                        raise KeyError(
-                            f"Column '{old_col}' does not exist in the source DataFrame."
-                        )
-                    metadata[new_col] = row.get(old_col)
+                    region_mask = pd.Series([False] * len(gdf))
+                    for col in region_column:
+                        if (gdf[col] == region_name).any():
+                            region_mask |= gdf[col] == region_name
+                            break
+                    row_indices = gdf[years_mask & region_mask].index.tolist()
+                    break
 
-                rows.append(metadata)
-                geometry.append(row.get("geometry", None))
+            if row_indices is not None:
+                break
 
-    return gpd.GeoDataFrame(
-        rows,
-        columns=columns,
+        if row_indices is None or not len(row_indices):
+            continue
+
+        if filepath.suffix in [".tiff", ".tif"]:
+            with rasterio.open(filepath, crs=gdf.crs) as img:
+                width, height = img.width, img.height
+        else:
+            with Image.open(filepath) as img:
+                width, height = img.size
+
+        metadata["width"] = width
+        metadata["height"] = height
+
+        for index in row_indices:
+            row = gdf.iloc[index]
+            if preserve_fields:
+                metadata.update(extract_fields(row, field_map))
+
+            update_metadata_region_name_and_years(
+                metadata,
+                region_column,
+                start_year_column,
+                end_year_column,
+                region_name,
+                start_year,
+                end_year,
+            )
+
+            metadata["bbox"] = row.get("bbox")
+            matching_geometry = row.get("geometry")
+
+            if row.get("bbox") is None and row.get("geometry") is not None:
+                metadata["bbox"] = shapely.box(*row.get("geometry").bounds)
+
+            rows.append(metadata)
+            geometry.append(matching_geometry)
+
+        gdf = gdf.drop(row_indices).reset_index(drop=True)
+
+    if not len(rows):
+        raise ValueError("No metadata found for mapping")
+
+    result = gpd.GeoDataFrame(
+        (
+            gpd.GeoDataFrame.from_dict(
+                rows,
+                geometry=geometry,
+                crs=gdf_src.crs,
+            )
+            .explode()
+            .drop_duplicates()
+            .reset_index(drop=True)
+        ),
         geometry=geometry,
         crs=gdf_src.crs,
     )
 
+    return result.sort_values(by=region_column).reset_index(drop=True)
+
 
 def map_geometry_to_geotiffs(
-    gdf: gpd.GeoDataFrame, images_dir: PathLike, recurse: bool = True
+    gdf: gpd.GeoDataFrame,
+    image_paths: list[PathLike],
+    preserve_fields: list[str | dict[str, str]] | None = None,
 ) -> gpd.GeoDataFrame:
     """
     Maps geometries in a GeoDataFrame to corresponding GeoTIFF files based on spatial intersections.
 
     Parameters:
         gdf (gpd.GeoDataFrame): The GeoDataFrame containing geometries to map.
-        img_dir (PathLike): The directory containing GeoTIFF files to map geometries to.
+        images_dir (PathLike): The directory containing GeoTIFF files to map geometries to.
         recurse (bool): Whether to search for GeoTIFFs recursively within the directory. Defaults to True.
+        **kwargs: Additional arguments, including `preserve_fields` for retaining specific fields.
 
     Returns:
         gpd.GeoDataFrame: A new GeoDataFrame containing metadata for each GeoTIFF, including the intersecting geometries.
     """
-    images_dir = Path(images_dir).resolve()
-
-    columns = [
-        "filename",
-        "path",
-        "width",
-        "height",
-    ]
     rows = []
     geometry = []
 
-    orig_stems = [
-        os.path.splitext(filename)[0] for filename in gdf["filename"].unique().tolist()
-    ]
+    image_paths = [Path(path) for path in image_paths]
+    field_map = dict()
+    if preserve_fields:
+        field_map = normalize_fields(preserve_fields)
 
-    # Helper function to compare a stem against a list of names.
-    def compare_stem(stem, names):
-        for name in names:
-            if stem[: len(name)] in name:
-                return True
-        return False
-
-    image_paths = [
-        path
-        for path in collect_files_with_suffix(".tif", images_dir, recurse=recurse)
-        if compare_stem(path.stem, orig_stems)
-    ]
-
+    # Iterate over each GeoTIFF file and map intersecting geometries
     for path in tqdm(
         image_paths,
         desc="Mapping geometry to GeoTIFFs",
         leave=False,
     ):
-        with rasterio.open(path) as src:
-            # Create a window that represents the full extent of the GeoTIFF.
-            tile_window = create_window(0, 0, src.width, src.height)
+        with rasterio.open(path, crs=gdf.crs) as src:
+            # Create a window that represents the full extent of the GeoTIFF
+            (rmin, _), (cmin, _) = get_rows_cols_min_max_bounds(src)
+            tile_window = create_window(cmin, rmin, src.width, src.height)
 
-            # Create a polygon representing the bounds of the GeoTIFF.
+            # Create a polygon representing the bounds of the GeoTIFF
             tile_polygon = create_tile_polygon(src, tile_window)
 
-            # Find polygons in the GeoDataFrame that intersect with the GeoTIFF polygon.
+            # Find polygons in the GeoDataFrame that intersect with the GeoTIFF polygon
             intersecting_polygons = gdf.loc[gdf.intersects(tile_polygon)]
 
             row = {
@@ -175,21 +249,20 @@ def map_geometry_to_geotiffs(
                 "height": src.height,
             }
 
-            # If intersecting polygons are found, add them to the output lists.
             if not intersecting_polygons.empty:
                 for _, polygon_row in intersecting_polygons.iterrows():
+                    row = {**row, **extract_fields(polygon_row, field_map)}
                     geometry.append(polygon_row["geometry"].intersection(tile_polygon))
                     rows.append(row)
             else:
-                # If no intersections, append an empty polygon for completeness.
                 geometry.append(Polygon())
                 rows.append(row)
 
-    return gpd.GeoDataFrame(
-        gpd.GeoDataFrame(rows, columns=columns, geometry=geometry, crs=gdf.crs)
-        .explode()
-        .drop_duplicates()
-    )
+    # Create the resulting GeoDataFrame
+    result_gdf = gpd.GeoDataFrame.from_dict(rows, geometry=geometry, crs=gdf.crs)
+
+    # Explode multi-part geometries and drop duplicates
+    return gpd.GeoDataFrame(result_gdf.explode().drop_duplicates())
 
 
 def map_geometries_by_year_span(
@@ -197,6 +270,7 @@ def map_geometries_by_year_span(
     images_dir: PathLike,
     start_year_col: str,
     end_year_col: str,
+    preserve_fields: list[str | dict[str, str]] | None = None,
 ):
     """
     Maps geometries to GeoTIFFs based on unique start and end year pairs.
@@ -212,14 +286,15 @@ def map_geometries_by_year_span(
         end_year_col (str): The name of the column representing the end year.
         map_geometry_to_geotiffs (function): A user-defined function that processes a
                                              GeoDataFrame and generates GeoTIFFs.
-        output_dir (str): Directory where the GeoTIFFs generated by the mapping function
-                          will be stored.
 
     Returns:
         list[GeoDataFrame]: A list of GeoDataFrames containing the mapped geometries,
                             with start and end year columns added.
     """
     gdf = gdf.copy()
+    gdf[start_year_col] = gdf[start_year_col].apply(lambda year: int(year))
+    gdf[end_year_col] = gdf[end_year_col].apply(lambda year: int(year))
+
     # Identify unique year pairs and sort them
     year_pairs = gdf[[start_year_col, end_year_col]].drop_duplicates()
     year_pairs = year_pairs.sort_values(by=[start_year_col, end_year_col])
@@ -227,20 +302,38 @@ def map_geometries_by_year_span(
     end_years = [int(year) for year in year_pairs[end_year_col].tolist()]
 
     mapped_gdfs = []
+    images = collect_files_with_suffix([".tif", ".tiff"], images_dir, recurse=True)
 
     for start_year, end_year in zip(start_years, end_years):
+        target_images = [
+            path
+            for path in images
+            if stem_contains_years(path.stem, start_year, end_year)
+        ]
+        if not len(target_images):
+            print(
+                f"No images found for years {start_year} to {end_year}", file=sys.stderr
+            )
+            continue
+
         # Filter rows that match the current year pair
         target_years = gpd.GeoDataFrame(
-            gdf[(gdf[start_year_col] == start_year) & (gdf[end_year_col] == end_year)]
+            gdf[(gdf[start_year_col] == start_year) & (gdf[end_year_col] == end_year)],
+            crs=gdf.crs,
         )
         # Apply the mapping function to the filtered rows
         gdf_mapped = map_geometry_to_geotiffs(
             target_years,
-            images_dir,
+            target_images,
+            preserve_fields=preserve_fields,
         )
-        # Add the year columns back into the resulting GeoDataFrame
-        gdf_mapped.insert(0, start_year_col, start_year)
-        gdf_mapped.insert(1, end_year_col, end_year)
+        if not len(([True for col in gdf_mapped.columns if col == start_year_col])):
+            # Add the year columns back into the resulting GeoDataFrame
+            gdf_mapped.insert(0, start_year_col, int(start_year))
+            gdf_mapped.insert(1, end_year_col, int(end_year))
+        else:
+            gdf_mapped[start_year_col] = int(start_year)
+            gdf_mapped[end_year_col] = int(end_year)
 
         mapped_gdfs.append(gdf_mapped)
 

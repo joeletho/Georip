@@ -1,15 +1,23 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from os import PathLike
 from pathlib import Path
+from typing import Callable
 
 import geopandas as gpd
 import pandas as pd
 from tqdm.auto import trange
 
-from ftcnn.datasets.utils import cleanup_unused_tiles, init_dataset_filepaths
+from ftcnn.datasets.utils import (
+    TMP_FILE_PREFIX,
+    cleanup_unused_tiles,
+    init_dataset_filepaths,
+)
 from ftcnn.geospacial.mapping import map_geometries_by_year_span
-from ftcnn.geospacial.processing import preprocess_shapefile
-from ftcnn.geospacial.utils import translate_xy_coords_to_index
+from ftcnn.geospacial.processing import preprocess_ndvi_shapefile
+from ftcnn.geospacial.utils import (
+    gdf_intersects_region_year_geometry,
+    translate_xy_coords_to_index,
+)
 from ftcnn.io import (
     clear_directory,
     collect_files_with_suffix,
@@ -27,8 +35,8 @@ def preprocess_ndvi_difference_dataset(
     output_dir: PathLike,
     years: tuple[int, int] | None = None,
     img_path_col: str = "path",
-    start_year_col: str = "StartYear",
-    end_year_col: str = "EndYear",
+    start_year_col: str = "start_year",
+    end_year_col: str = "end_year",
     clean_dest: bool = False,
 ) -> list[Path]:
     """
@@ -59,9 +67,11 @@ def preprocess_ndvi_difference_dataset(
     else:
 
         def match_years(df):
+            start_year = int(years[0])
+            end_year = int(years[1])
             return (
                 df.loc[
-                    (df[start_year_col] == years[0]) & (df[end_year_col] == years[1]),
+                    (df[start_year_col] == start_year) & (df[end_year_col] == end_year),
                     img_path_col,
                 ]
                 .unique()
@@ -94,11 +104,13 @@ def preprocess_ndvi_difference_rasters(
     start_year_col: str = "start_year",
     end_year_col: str = "end_year",
     geom_col: str = "geometry",
+    filter_geometry: Callable | None = None,
     tile_size: int | tuple[int, int] | None = None,
     exist_ok: bool = False,
     clean_dest: bool = False,
     leave: bool = True,
     num_workers: int | None = None,
+    preserve_fields: list[str | dict[str, str]] | None = None,
 ) -> gpd.GeoDataFrame:
     """
     Preprocesses the NDVI difference rasters by creating tiles and mapping geometry to the corresponding GeoTIFFs.
@@ -153,26 +165,32 @@ def preprocess_ndvi_difference_rasters(
                 create_raster_tiles,
                 path,
                 crs=gdf.crs,
-                tile_size=tile_size,
+                tile_size=tile_size if tile_size[0] is not None else None,
                 output_dir=tiles_dir / path.stem,
                 exist_ok=exist_ok,
+                filter_geometry=filter_geometry,
             )
             for path in target_imgs
         ]
-        for _ in as_completed(futures):
+        for future in as_completed(futures):
+            exception = future.exception()
+            if exception:
+                raise exception
             pbar.update()
 
     mapped_gdfs = map_geometries_by_year_span(
-        gdf, tiles_dir, start_year_col, end_year_col
+        gdf,
+        tiles_dir,
+        start_year_col,
+        end_year_col,
+        preserve_fields=preserve_fields,
     )
 
     if not len(mapped_gdfs) or mapped_gdfs[0].empty:
         raise ValueError(
             f"Did not find geometies for years {gdf[start_year_col].iat[0]} to {gdf[end_year_col].iat[0]}"
         )
-    else:
-        gdf = gpd.GeoDataFrame(pd.concat(mapped_gdfs, ignore_index=True), crs=gdf.crs)
-
+    gdf = gpd.GeoDataFrame(pd.concat(mapped_gdfs, ignore_index=True), crs=gdf.crs)
     gdf.set_geometry("geometry", inplace=True)
 
     pbar.update()
@@ -197,11 +215,12 @@ def preprocess_ndvi_difference_rasters(
 
 
 def make_ndvi_difference_dataset(
-    source_shp: PathLike,
-    images_dir: PathLike,
-    output_dir: PathLike,
+    source_shp: str | PathLike,
+    source_images_dir: str | PathLike,
+    output_dir: str | PathLike,
     *,
     years: tuple[int, int] | None = None,
+    region_col: str | list[str] = "region",
     start_year_col: str = "start_year",
     end_year_col: str = "end_year",
     geom_col: str = "geometry",
@@ -215,6 +234,7 @@ def make_ndvi_difference_dataset(
     convert_to_png: bool = True,
     pbar_leave: bool = True,
     num_workers: int | None = None,
+    preserve_fields: list[str | dict[str, str]] | None = None,
 ) -> tuple[str, gpd.GeoDataFrame]:
     """
     Creates an NDVI difference dataset by processing a shapefile and the associated NDVI image files.
@@ -248,7 +268,7 @@ def make_ndvi_difference_dataset(
     """
     filepaths = init_dataset_filepaths(
         source_shp=source_shp,
-        images_dir=images_dir,
+        source_images_dir=source_images_dir,
         output_dir=output_dir,
         exist_ok=exist_ok,
         save_csv=save_csv,
@@ -256,9 +276,10 @@ def make_ndvi_difference_dataset(
         save_gpkg=save_gpkg,
         clean_dest=clean_dest,
     )
+
     source_shp = filepaths["source_shp"]
     output_dir = filepaths["output_dir"]
-    images_dir = filepaths["images_dir"]
+    source_images_dir = filepaths["source_images_dir"]
     tiles_dir = filepaths["tiles_dir"]
     csv_dir = filepaths["csv_dir"]
     shp_dir = filepaths["shp_dir"]
@@ -273,21 +294,48 @@ def make_ndvi_difference_dataset(
         leave=pbar_leave,
     )
 
-    gdf = preprocess_shapefile(
-        source_shp,
-        start_year_col=start_year_col,
-        end_year_col=end_year_col,
-        images_dir=images_dir,
-    )
-    pbar.update()
+    ds_name = source_shp.stem.replace(TMP_FILE_PREFIX, "")
 
-    start_year_col = "start_year"
-    end_year_col = "end_year"
-
-    ds_name = source_shp.stem
     if years is not None:
         ds_name += f"_{years[0]}to{years[1]}"
     ds_name = Path(ds_name)
+
+    if not preserve_fields:
+        preserve_fields = []
+
+    if "start_year" not in preserve_fields:
+        preserve_fields.append({start_year_col: "start_year"})
+    if "end_year" not in preserve_fields:
+        preserve_fields.append({end_year_col: "end_year"})
+
+    gdf = preprocess_ndvi_shapefile(
+        source_shp,
+        years=years,
+        region_col=region_col,
+        start_year_col=start_year_col,
+        end_year_col=end_year_col,
+        images_dir=source_images_dir,
+        preserve_fields=preserve_fields,
+    )
+    pbar.update()
+
+    preserve_fields = [
+        field
+        for field in preserve_fields
+        if not (
+            isinstance(field, dict)
+            and (
+                (start_year_col in field and field[start_year_col] == "start_year")
+                or (end_year_col in field and field[end_year_col] == "end_year")
+            )
+        )
+    ]
+
+    preserve_fields.append("start_year")
+    preserve_fields.append("end_year")
+
+    start_year_col = "start_year"
+    end_year_col = "end_year"
 
     if save_csv:
         save_as_csv(gdf, csv_dir / ds_name.with_suffix(".csv"))
@@ -317,7 +365,17 @@ def make_ndvi_difference_dataset(
         exist_ok=exist_ok,
         leave=False,
         num_workers=num_workers,
+        preserve_fields=preserve_fields,
+        filter_geometry=lambda filepath, geom: gdf_intersects_region_year_geometry(
+            gdf,
+            filepath=filepath,
+            geometry=geom,
+            region_column=region_col,
+            start_year_column=start_year_col,
+            end_year_column=end_year_col,
+        ),
     )
+
     pbar.update()
 
     if save_csv or save_shp:

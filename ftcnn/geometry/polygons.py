@@ -1,23 +1,24 @@
-from pathlib import Path
+import sys
 
 import geopandas as gpd
 import numpy as np
 import rasterio
 import shapely
-from osgeo.gdal import sys
 from rasterio.io import DatasetWriter
 from rasterio.windows import Window
-from shapely import normalize
+from shapely import MultiPolygon, normalize
 from shapely.geometry import Polygon
 from supervision.annotators.core import cv2
 
 from ftcnn.geometry import PolygonLike
+from ftcnn.utils.pandas import extract_fields, normalize_fields
 
 
 def flatten_polygons(
     gdf_src: gpd.GeoDataFrame,
     geometry_column: str = "geometry",
     group_by: str | list[str] | None = None,
+    preserve_fields: list[str | dict[str, str]] | None = None,
 ) -> gpd.GeoDataFrame:
     """
     Flattens MultiPolygons into individual Polygons and calculates bounding boxes for each geometry.
@@ -40,26 +41,31 @@ def flatten_polygons(
     """
     geometry = []
     rows = []
+    field_map = dict()
+    if preserve_fields:
+        field_map = normalize_fields(preserve_fields)
 
     for _, group in gdf_src.groupby(group_by, sort=False):
+        row = group.iloc[0].drop(geometry_column).to_dict()
         polygon = shapely.unary_union(group.geometry)
+
         if isinstance(polygon, shapely.MultiPolygon):
-            for i, poly in enumerate(polygon.geoms):
+            for poly in polygon.geoms:
                 poly = normalize(poly)
-                row = group.iloc[i].drop(geometry_column).to_dict()
-                for bbox in get_polygon_bboxes(polygon):
+                existing_fields = extract_fields(row, field_map)
+                for bbox in get_polygon_bboxes(poly):
                     row["bbox"] = bbox
-                    rows.append(row)
-                    geometry.append(polygon)
+                    rows.append({**row, **existing_fields})
+                    geometry.append(poly)
         else:
             polygon = normalize(polygon)
-            row = group.iloc[0].drop(geometry_column).to_dict()
+            existing_fields = extract_fields(row, field_map)
             for bbox in get_polygon_bboxes(polygon):
                 row["bbox"] = bbox
-                rows.append(row)
+                rows.append({**row, **existing_fields})
                 geometry.append(polygon)
 
-    return gpd.GeoDataFrame(rows, geometry=geometry, crs=gdf_src.crs)
+    return gpd.GeoDataFrame.from_dict(rows, geometry=geometry, crs=gdf_src.crs)
 
 
 def get_polygon_points(
@@ -88,8 +94,7 @@ def get_polygon_points(
             points = [point for point in polygon.exterior.coords]
         case "MultiPolygon":
             points = [
-                [point for point in polygon.exterior.coords]
-                for polygon in polygon.geoms
+                [point for point in poly.exterior.coords] for poly in polygon.geoms
             ]
         case _:
             raise ValueError("Unknown geometry type")
