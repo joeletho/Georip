@@ -1,10 +1,10 @@
 import shutil
-from os import PathLike
 from pathlib import Path
 
 import geopandas as gpd
 
 from ftcnn.geospacial import DataFrameLike
+from ftcnn.utils import StrPathLike
 
 from .geospacial import load_geo_dataframe, load_shapefile, open_geo_dataset
 
@@ -18,13 +18,13 @@ __all__ = [
 ]
 
 
-def pathify(path: PathLike | list[PathLike], *args) -> Path | list[Path]:
+def pathify(path: StrPathLike | list[StrPathLike], *args) -> Path | list[Path]:
     """
     Convert input paths into `Path` objects.
 
     Parameters:
-        path (PathLike | list[PathLike]): A single path or list of paths to be converted.
-        *args (PathLike): Additional paths to append to the result.
+        path (StrPathLike | list[StrPathLike]): A single path or list of paths to be converted.
+        *args (StrPathLike): Additional paths to append to the result.
 
     Returns:
         Path | list[Path]:
@@ -48,12 +48,12 @@ def pathify(path: PathLike | list[PathLike], *args) -> Path | list[Path]:
     return paths if isinstance(path, list) else paths[0]
 
 
-def clear_directory(dir_path: PathLike) -> None:
+def clear_directory(dir_path: StrPathLike) -> None:
     """
     Remove all files and subdirectories within a directory, preserving the directory itself.
 
     Parameters:
-        dir_path (PathLike): Path to the directory to be cleared.
+        dir_path (StrPathLike): Path to the directory to be cleared.
 
     Returns:
         None
@@ -78,14 +78,14 @@ def clear_directory(dir_path: PathLike) -> None:
 
 
 def collect_files_with_suffix(
-    suffix: str | list[str], dir_path: PathLike, *, recurse: bool = False
+    suffix: str | list[str], dir_path: StrPathLike, *, recurse: bool = False
 ) -> list[Path]:
     """
     Collect files with a specific suffix or list of suffixes in a directory.
 
     Parameters:
         suffix (str | list[str]): File suffix (e.g., ".txt") or a list of suffixes to filter files.
-        dir_path (PathLike): Path to the directory to search for files.
+        dir_path (StrPathLike): Path to the directory to search for files.
         recurse (bool, optional): Whether to search subdirectories recursively. Defaults to False.
 
     Returns:
@@ -111,13 +111,15 @@ def collect_files_with_suffix(
     return files
 
 
-def save_as_shp(gdf: gpd.GeoDataFrame, path: PathLike, exist_ok: bool = False) -> None:
+def save_as_shp(
+    gdf: gpd.GeoDataFrame, path: StrPathLike, exist_ok: bool = False
+) -> None:
     """
     Save a GeoDataFrame as an ESRI Shapefile (.shp).
 
     Parameters:
         gdf (gpd.GeoDataFrame): The GeoDataFrame to save.
-        path (PathLike): The file path to save the Shapefile.
+        path (StrPathLike): The file path to save the Shapefile.
         exist_ok (bool, optional): If False, raises a FileExistsError if the file exists.
                                    Defaults to False.
 
@@ -141,13 +143,15 @@ def save_as_shp(gdf: gpd.GeoDataFrame, path: PathLike, exist_ok: bool = False) -
     gdf.to_file(path, driver="ESRI Shapefile")
 
 
-def save_as_gpkg(gdf: gpd.GeoDataFrame, path: PathLike, exist_ok: bool = False) -> None:
+def save_as_gpkg(
+    gdf: gpd.GeoDataFrame, path: StrPathLike, exist_ok: bool = False
+) -> None:
     """
     Save a GeoDataFrame as a GeoPackage (.gpkg).
 
     Parameters:
         gdf (gpd.GeoDataFrame): The GeoDataFrame to save.
-        path (PathLike): The file path to save the GeoPackage.
+        path (StrPathLike): The file path to save the GeoPackage.
         exist_ok (bool, optional): If False, raises a FileExistsError if the file exists.
                                    Defaults to False.
 
@@ -170,13 +174,13 @@ def save_as_gpkg(gdf: gpd.GeoDataFrame, path: PathLike, exist_ok: bool = False) 
     gdf.to_file(path, driver="GPKG")
 
 
-def save_as_csv(df: DataFrameLike, path: PathLike, exist_ok: bool = False) -> None:
+def save_as_csv(df: DataFrameLike, path: StrPathLike, exist_ok: bool = False) -> None:
     """
     Save a DataFrame or GeoDataFrame as a CSV file.
 
     Parameters:
         df (DataFrameLike): The DataFrame or GeoDataFrame to save.
-        path (PathLike): The file path to save the CSV file.
+        path (StrPathLike): The file path to save the CSV file.
         exist_ok (bool, optional): If False, raises a FileExistsError if the file exists.
                                    Defaults to False.
 

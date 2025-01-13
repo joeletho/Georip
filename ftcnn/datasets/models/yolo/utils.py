@@ -20,7 +20,7 @@ def create_ndvi_difference_dataset(cls, config):
     total_updates += 1 if generate_train_data else 0
     pbar = trange(
         total_updates,
-        desc=f"Creating YOLO dataset - Creating YOLODataset with {len(gdf.keys())} labels",
+        desc=f"Creating YOLO dataset - Creating YOLODataset with {len(gdf)} labels",
         leave=pbar_leave,
     )
     yolo_ds = geodataframe_to_yolo(gdf)

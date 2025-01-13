@@ -1,6 +1,5 @@
 import re
 import sys
-from os import PathLike
 from pathlib import Path
 from typing import Callable
 
@@ -11,12 +10,13 @@ from rasterio import rasterio
 from shapely import MultiPolygon, Polygon
 
 from ftcnn.geometry import PolygonLike
-from ftcnn.geometry.polygons import get_polygon_points
+from ftcnn.geometry.polygons import get_polygon_points, is_sparse_polygon
 from ftcnn.geospacial import DataFrameLike
 from ftcnn.geospacial.conversion import (
     translate_polygon_index_to_xy,
     translate_polygon_xy_to_index,
 )
+from ftcnn.utils import StrPathLike
 
 
 def collect_filepaths(df: DataFrameLike, column_name: str) -> list[str]:
@@ -58,7 +58,7 @@ def tokenize_region_and_years_from_series(
     region_column: str,
     start_year_column: str,
     end_year_column: str,
-) -> dict[str, str | tuple[int, int]]:
+) -> dict[str, tuple[int, int]]:
     region = series.get(region_column)
     startyear = series.get(start_year_column)
     endyear = series.get(end_year_column)
@@ -105,7 +105,7 @@ def parse_filename(
 
 
 def parse_region_and_years_from_path(
-    image_path: PathLike,
+    image_path: StrPathLike,
 ) -> tuple[str, tuple[int, int]]:
     """
     Parses the region and years from the file path.
@@ -200,7 +200,7 @@ def translate_index_coords_to_xy(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
 
 def raster_contains_polygon(
-    source_path: str | PathLike, polygon: PolygonLike | list[PolygonLike]
+    source_path: StrPathLike, polygon: PolygonLike | list[PolygonLike]
 ) -> bool:
     """
     Checks if any of the provided polygons (or multipolygons) are fully contained within the bounds of the raster.
@@ -248,39 +248,57 @@ def gdf_intersects_region_year_geometry(
     Raises:
         Prints an error message to stderr if matching rows are found but no valid intersection is detected.
     """
-    if not isinstance(region_column, list):
-        region_column = [region_column]
+    if not geometry.is_empty and geometry.area > 1:
+        if not isinstance(region_column, list):
+            region_column = [region_column]
 
-    path_stem = Path(filepath).stem
-    for _, row in gdf.iterrows():
-        start_year = row.get(start_year_column)
-        start_year = int(start_year) if start_year else None
-        end_year = row.get(end_year_column)
-        end_year = int(end_year) if end_year else None
+        path_stem = Path(filepath).stem
+        for _, row in gdf.iterrows():
+            start_year = row.get(start_year_column)
+            start_year = int(start_year) if start_year else None
+            end_year = row.get(end_year_column)
+            end_year = int(end_year) if end_year else None
 
-        for region in region_column:
-            region_name = row.get(region)
-            if region_name is None:
-                continue
+            for region in region_column:
+                region_name = row.get(region)
+                if region_name is None:
+                    continue
 
-            if stem_contains_region_and_years(
-                path_stem, str(region_name), str(start_year), str(end_year)
-            ):
-                matched_rows = gdf[
-                    (gdf[region] == region_name)
-                    & (gdf[start_year_column] == start_year)
-                    & (gdf[end_year_column] == end_year)
-                ]
-                if matched_rows.empty:
-                    print(
-                        "Error matching rows for",
-                        region_name,
-                        start_year,
-                        end_year,
-                        file=sys.stderr,
-                    )
-                    return False
-                return bool(matched_rows.intersects(geometry).any())
+                if stem_contains_region_and_years(
+                    path_stem, str(region_name), str(start_year), str(end_year)
+                ):
+                    matched_rows = gdf.loc[
+                        (gdf[region] == region_name)
+                        & (gdf[start_year_column] == start_year)
+                        & (gdf[end_year_column] == end_year)
+                    ]
+
+                    if matched_rows.empty:
+                        print(
+                            "Error matching rows for",
+                            region_name,
+                            start_year,
+                            end_year,
+                            file=sys.stderr,
+                        )
+                        return False
+
+                    intersection = matched_rows.intersection(geometry).explode()
+                    if intersection.empty:
+                        return False
+
+                    # Check for undesireable polygons. If we find any, fail.
+                    sparse_mask = intersection.apply(is_sparse_polygon)
+                    # print("Sparse mask:", sparse_mask)
+                    is_sparse = all(sparse_mask)
+                    # NOTE: DEBUG
+                    # print(
+                    #     "is_sparse:",
+                    #     is_sparse,
+                    #     "geometry:",
+                    #     geometry,
+                    # )
+                    return not is_sparse
     return False
 
 
@@ -375,3 +393,75 @@ def debug_print_geom_with_regions_and_years(
             for region in region_column
         ],
     )
+
+
+def get_gdf_valid_geometry(gdf, geometry_column):
+    return gpd.GeoDataFrame(
+        gdf[(gdf[geometry_column].notnull() & ~gdf[geometry_column].is_empty)],
+        crs=gdf.crs,
+    )
+
+
+def gdf_ndvi_validate_years_as_ints(gdf, start_year_column, end_year_column):
+    """
+    Validates and converts the specified year columns in a GeoDataFrame to integers, handling invalid values.
+
+    Parameters:
+        gdf (GeoDataFrame): The GeoDataFrame containing the year columns to validate and convert.
+        start_year_column (str): The name of the column representing the start year.
+        end_year_column (str): The name of the column representing the end year.
+
+    Returns:
+        GeoDataFrame: The modified GeoDataFrame with the year columns converted to integers.
+    """
+    gdf = gdf.copy()
+
+    for col in [start_year_column, end_year_column]:
+        gdf[col] = pd.to_numeric(gdf[col], errors="coerce")
+        if gdf[col].isna().any():
+            print(
+                f"Warning: Found invalid entries in column '{col}', dropping rows with invalid values."
+            )
+            gdf = gdf.loc[gdf[col].notna()]
+        gdf[col] = gdf[col].astype(int)
+
+    return gdf
+
+
+def gdf_matches_image_crs(gdf, images: StrPathLike | list[StrPathLike]) -> bool:
+    """
+    Checks if the coordinate reference system (CRS) of a GeoDataFrame matches the CRS of one or more GeoTIFF images.
+
+    Parameters:
+        gdf (GeoDataFrame): A GeoDataFrame with a defined CRS.
+        images (StrPathLike | list[StrPathLike]): A single path or a list of paths pointing to GeoTIFF image files.
+
+    Returns:
+        bool: True if the CRS of the GeoDataFrame matches the CRS of all provided images; False otherwise.
+
+    Raises:
+        ValueError: If 'images' is an empty list or does not contain valid path strings or StrPathLike objects.
+
+    Explanation:
+        - The function accepts a single image path or a list of image paths. If a single path is provided, it is wrapped in a list for consistency.
+        - Each image file is opened using `rasterio` to access its CRS.
+        - The function returns False if any image CRS differs from the GeoDataFrame CRS.
+        - If all images have matching CRS, the function returns True.
+    """
+    if not isinstance(images, list):
+        images = [images]
+    if not len(images):
+        raise ValueError(
+            "'images' must contain a str, StrPathLike, or list of either pointing to the path of GeoTIFF image(s)"
+        )
+
+    for path in images:
+        with rasterio.open(path) as src:
+            if src.crs != gdf.crs:
+                return False
+    return True
+
+
+def gdf_set_crs_to_image(gdf: DataFrameLike, image: StrPathLike) -> None:
+    with rasterio.open(image) as src:
+        gdf.to_crs(src.crs, inplace=True)

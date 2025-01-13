@@ -1,5 +1,4 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from os import PathLike
 from pathlib import Path
 from time import time
 from typing import Callable
@@ -11,7 +10,7 @@ from tqdm.auto import trange
 from ftcnn.geometry.polygons import create_tile_polygon
 from ftcnn.io import clear_directory, collect_files_with_suffix
 from ftcnn.raster.utils import get_rows_cols_min_max_bounds
-from ftcnn.utils import _WRITE_LOCK, NUM_CPU, TQDM_INTERVAL
+from ftcnn.utils import _WRITE_LOCK, NUM_CPU, TQDM_INTERVAL, StrPathLike
 
 from . import create_window, write_raster
 from .conversion import raster_to_png
@@ -31,8 +30,8 @@ def process_raster_to_png_conversion(
     - Optionally clears the destination directory before saving new files.
 
     Parameters:
-        src_dir (PathLike): Source directory containing TIFF files to convert.
-        dest_dir (PathLike): Destination directory to save converted PNG files.
+        src_dir (StrPathLike): Source directory containing TIFF files to convert.
+        dest_dir (StrPathLike): Destination directory to save converted PNG files.
         recurse (bool): Whether to recurse into subdirectories (default is True).
         preserve_dir (bool): Whether to preserve directory structure in destination (default is True).
         clear_dir (bool): Whether to clear the destination directory before saving (default is True).
@@ -93,7 +92,7 @@ def tile_raster_and_convert_to_png(source_path, *, tile_size):
     - Returns a list of the PNG images and the EPSG code of the original GeoTIFF.
 
     Parameters:
-        source_path (PathLike): Path to the GeoTIFF file to be tiled and converted.
+        source_path (StrPathLike): Path to the GeoTIFF file to be tiled and converted.
         tile_size (tuple[int, int]): Size of the tiles (in pixels) to create from the GeoTIFF.
 
     Returns:
@@ -122,10 +121,10 @@ def tile_raster_and_convert_to_png(source_path, *, tile_size):
 
 
 def create_raster_tiles(
-    source_path: PathLike,
+    source_path: StrPathLike,
     tile_size: tuple[int, int],
     crs: str | None = None,
-    output_dir: PathLike | None = None,
+    output_dir: StrPathLike | None = None,
     exist_ok: bool = False,
     leave: bool = False,
     filter_geometry: Callable | None = None,
@@ -134,10 +133,10 @@ def create_raster_tiles(
     Creates raster tiles from a source raster and saves them to disk (or returns them as arrays).
 
     Parameters:
-        source_path (PathLike): The file path to the source raster.
+        source_path (StrPathLike): The file path to the source raster.
         tile_size (tuple[int, int]): The size of the tiles (width, height).
         crs (str | None, optional): The coordinate reference system to use. Defaults to None.
-        output_dir (PathLike | None, optional): Directory where the tiles should be saved. Defaults to None.
+        output_dir (StrPathLike | None, optional): Directory where the tiles should be saved. Defaults to None.
         exist_ok (bool, optional): If False, raises an error if tile files already exist. Defaults to False.
         leave (bool, optional): If True, leaves the progress bar description when finished. Defaults to False.
 
@@ -159,6 +158,13 @@ def create_raster_tiles(
         updates = 0
         start = time()
         pbar = trange(total_updates, desc=f"Processing {source_path.name}", leave=leave)
+
+        def update_pbar():
+            nonlocal pbar, start, updates
+            if time() - start >= TQDM_INTERVAL * NUM_CPU:
+                pbar.update()
+                updates += 1
+                start = time()
 
         for row in range(rmin, rmax, height):
             for col in range(cmin, cmax, width):
@@ -190,6 +196,7 @@ def create_raster_tiles(
                             "'filter_geometry' callback return expects a True or False"
                         )
                     if not keep_geom:
+                        update_pbar()
                         continue
 
                 bands = (
@@ -222,10 +229,8 @@ def create_raster_tiles(
                     )
                 )
                 _WRITE_LOCK.free(lock_id)
-                if time() - start >= TQDM_INTERVAL:
-                    pbar.update()
-                    updates += 1
-                    start = time()
+                update_pbar()
+
         pbar.update(total_updates - updates)
         pbar.close()
     return tiles

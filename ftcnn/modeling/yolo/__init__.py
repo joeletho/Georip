@@ -16,6 +16,7 @@ from torchvision.io import read_image
 from torchvision.transforms.v2 import functional as F
 from tqdm.auto import trange
 
+from ftcnn.geometry import normalize_point
 from ftcnn.io import clear_directory
 from ftcnn.modeling import maskrcnn
 from ftcnn.modeling.maskrcnn import collate_fn
@@ -48,7 +49,7 @@ class YOLODatasetBase(Serializable):
         self.images = images
 
         if compile:
-            if num_workers is None:
+            if num_workers is None or not isinstance(num_workers, int):
                 num_workers = 1
             self.compile(num_workers)
 
@@ -151,24 +152,6 @@ class YOLODatasetBase(Serializable):
         return classes
 
     @staticmethod
-    def normalize_point(x, y, width, height, xoffset, yoffset):
-        dw = 1 / float(width)
-        dh = 1 / float(height)
-        x = float(x)
-        y = float(y)
-        if xoffset and yoffset:
-            xoffset = float(xoffset)
-            yoffset = float(yoffset)
-            x = (x + xoffset) * dw
-            y = (y + yoffset) * dh
-            xoffset *= dw
-            yoffset *= dh
-        else:
-            x *= dw
-            y *= dh
-        return round(x, 6), round(y, 6), round(xoffset, 6), round(yoffset, 6)
-
-    @staticmethod
     def convert_bbox_to_yolo(
         *,
         bbox: BBox,
@@ -189,19 +172,22 @@ class YOLODatasetBase(Serializable):
         BBox
             the converted bbox object
         """
+
         if bbox.x > 1 or bbox.y > 1 or bbox.width > 1 or bbox.height > 1:
-            x, y, w, h = YOLODatasetBase.normalize_point(
+            x, y, w, h = normalize_point(
                 bbox.x,
                 bbox.y,
                 imgsize[0],
                 imgsize[1],
-                bbox.width,
-                bbox.height,
+                xoffset=bbox.width,
+                yoffset=bbox.height,
+                include_dims=True,
             )
             bbox.x = round(x / 2, 6)
             bbox.y = round(y / 2, 6)
             bbox.width = w
             bbox.height = h
+
         return bbox
 
     def compile(self, num_workers=1):
@@ -323,7 +309,7 @@ class YOLODatasetBase(Serializable):
                 )
                 self._lock.free(lock_id)
 
-                if time() - start >= TQDM_INTERVAL:
+                if time() - start >= TQDM_INTERVAL * NUM_CPU:
                     lock_id = self._lock.acquire()
                     pbar.update()
                     updates += 1
@@ -349,7 +335,7 @@ class YOLODatasetBase(Serializable):
                 for future in as_completed(futures):
                     msg = future.exception()
                     if msg is not None:
-                        raise RuntimeError(msg)
+                        raise msg
 
         self.data_frame = pd.DataFrame.from_dict(data)
         self.data_frame = self.data_frame.drop_duplicates()
@@ -419,24 +405,26 @@ class YOLODatasetBase(Serializable):
         """
         compile = kwargs.pop("compile", None)
         compile = compile if compile is not None else True
-        num_workers = kwargs.pop("num_workers", None)
+        num_workers = kwargs.pop("num_workers", NUM_CPU)
 
         df = pd.read_csv(path)
         image_map = {row["filename"]: str(row["path"]) for _, row in df.iterrows()}
         image_names = set()
         images = []
+
         labels = parse_labels_from_csv(path, **kwargs)
         total_updates = len(labels)
         updates = 0
         start = time()
         pbar = trange(total_updates, desc="Collecting images", leave=False)
+
         for label in labels:
             image_name = label.image_filename
             if image_name not in image_names:
                 image_names.add(image_name)
                 image = ImageData(image_map[image_name])
                 images.append(image)
-            if time() - start >= TQDM_INTERVAL:
+            if time() - start >= TQDM_INTERVAL * NUM_CPU:
                 pbar.update()
                 updates += 1
                 start = time()

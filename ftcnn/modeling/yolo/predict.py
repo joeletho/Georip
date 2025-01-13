@@ -37,7 +37,7 @@ def predict_on_image_stream(model, *, images, conf=0.6, **kwargs):
     """
     batch_size = kwargs.get("batch_size")
     if batch_size is None:
-        num_workers = kwargs.get("num_workers")
+        num_workers = kwargs.get("num_workers", NUM_CPU)
         batch_size = num_workers if num_workers is not None else NUM_CPU
     else:
         kwargs.pop("batch_size")

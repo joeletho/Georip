@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from ctypes import ArgumentError
 from enum import Enum
 from pathlib import Path
+from time import sleep
 from typing import Callable
 from xml.etree import ElementTree as ET
 
@@ -553,13 +554,13 @@ def convert_segment_to_bbox(points: list[float]):
     # If two adjacent coordinates are the same, we probably
     # have a set of edges.
     # Remove duplicate coords x, y, y, x, x, y -> x, y, x, y
-    hits = 0
-    for i in range(len(points) - 1):
-        if points[i] == points[i + 1]:
-            if hits > 1:
-                points = list(set(points))
-                break
-            hits += 1
+    # hits = 0
+    # for i in range(len(points) - 1):
+    #     if points[i] == points[i + 1]:
+    #         if hits > 1:
+    #             points = list(set(points))
+    #             break
+    #         hits += 1
 
     n_points = len(points)
     xs = [points[i] for i in range(0, n_points, 2)]
@@ -579,7 +580,6 @@ def convert_segment_to_bbox(points: list[float]):
             raise ValueError("Point cannot be negative", bounds)
 
     return BBox(xmin, ymin, width, height)
-
 
 def plot_hist(img, bins=64):
     hist, bins = skimage.exposure.histogram(img, bins)

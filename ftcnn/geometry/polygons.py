@@ -6,11 +6,18 @@ import rasterio
 import shapely
 from rasterio.io import DatasetWriter
 from rasterio.windows import Window
-from shapely import MultiPolygon, normalize
+from shapely import (
+    MultiPolygon,
+    is_empty,
+    is_valid,
+    normalize,
+    remove_repeated_points,
+    simplify,
+)
 from shapely.geometry import Polygon
 from supervision.annotators.core import cv2
 
-from ftcnn.geometry import PolygonLike
+from ftcnn.geometry import PolygonLike, normalize_point
 from ftcnn.utils.pandas import extract_fields, normalize_fields
 
 
@@ -51,14 +58,22 @@ def flatten_polygons(
 
         if isinstance(polygon, shapely.MultiPolygon):
             for poly in polygon.geoms:
-                poly = normalize(poly)
+                poly = remove_repeated_points(normalize(poly))
+                if not poly.is_valid:
+                    continue
+                if poly.has_z:
+                    poly = Polygon([(x, y) for x, y, _ in poly.exterior.coords])
                 existing_fields = extract_fields(row, field_map)
                 for bbox in get_polygon_bboxes(poly):
                     row["bbox"] = bbox
                     rows.append({**row, **existing_fields})
                     geometry.append(poly)
         else:
-            polygon = normalize(polygon)
+            polygon = remove_repeated_points(normalize(polygon))
+            if not polygon.is_valid:
+                continue
+            if polygon.has_z:
+                polygon = Polygon([(x, y) for x, y, _ in polygon.exterior.coords])
             existing_fields = extract_fields(row, field_map)
             for bbox in get_polygon_bboxes(polygon):
                 row["bbox"] = bbox
@@ -273,7 +288,7 @@ def parse_polygon_str(polygon_str: str):
 
 def normalize_polygon(
     polygon: Polygon | str | list[tuple[int | float, int | float]] | list[int | float]
-):
+) -> Polygon:
     """
     Normalizes a polygon by converting various input formats into a simplified Polygon geometry.
 
@@ -308,9 +323,8 @@ def normalize_polygon(
                 ]
         elif isinstance(polygon, str):
             polygon = parse_polygon_str(polygon)
-        polygon = normalize(polygon)
 
-    return normalize(polygon.simplify(0.002, preserve_topology=True))
+    return remove_repeated_points(normalize(polygon), tolerance=0)
 
 
 def mask_to_polygon(mask):
@@ -330,3 +344,57 @@ def mask_to_polygon(mask):
     contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
     polygons = [Polygon(c.reshape(-1, 2)) for c in contours if len(c) >= 3]
     return polygons
+
+
+def is_sparse_polygon(
+    polygon: Polygon,
+    *,
+    min_area: int | float = 1,
+    max_aspect_ratio: int | float = 10,
+) -> bool:
+    """
+    Determines if a geometry is sparse (low area, long, and narrow).
+
+    Args:
+        polygon (Polygon): The input geometry (Polygon).
+        min_area (float): Minimum area threshold before scaling.
+        max_aspect_ratio (float): Maximum aspect ratio for considering the shape sparse.
+
+    Returns:
+        bool: True if the geometry is sparse, False otherwise.
+    """
+    if not isinstance(polygon, Polygon):
+        raise ValueError("Input geometry must be a Polygon")
+
+    xmin, ymin, xmax, ymax = polygon.bounds
+    width = xmax - xmin
+    height = ymax - ymin
+
+    if width == 0 or height == 0:
+        return True
+
+    if polygon.is_empty:
+        return True
+
+    if polygon.has_z:
+        polygon = Polygon(
+            [(x / width, y / height) for x, y, _ in polygon.exterior.coords]
+        )
+    else:
+        polygon = Polygon([(x / width, y / height) for x, y in polygon.exterior.coords])
+
+    polygon = remove_repeated_points(normalize(polygon), tolerance=0)
+    if not polygon.is_valid:
+        return True
+
+    scaling_factor = width * height
+    scaled_min_area = min_area / scaling_factor if scaling_factor > 0 else float("inf")
+
+    if polygon.area < scaled_min_area:
+        return True
+
+    aspect_ratio = max(width / height, height / width)
+    if aspect_ratio > max_aspect_ratio:
+        return True
+
+    return False

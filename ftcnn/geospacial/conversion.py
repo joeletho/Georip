@@ -1,10 +1,10 @@
-from os import PathLike
-
 import rasterio
 from shapely import Polygon
+from shapely.errors import InvalidGeometryError
 
 from ftcnn.geometry import clip_points
 from ftcnn.geometry.polygons import normalize_polygon
+from ftcnn.utils import StrPathLike
 
 
 def __append_points(src, points: list, out: list, to_type: str):
@@ -41,7 +41,7 @@ def __translate_polygon(source_path, polygon, to_type):
     and pixel index systems using a raster file as the source of reference.
 
     Parameters:
-        source_path: PathLike
+        source_path: StrPathLike
             Path to the raster file used for coordinate transformations.
         polygon: Polygon
             The input polygon to translate.
@@ -59,7 +59,7 @@ def __translate_polygon(source_path, polygon, to_type):
 
 
 def translate_polygon_xy_to_index(
-    source_path: PathLike,
+    source_path: StrPathLike,
     polygon: Polygon | str | list,
 ) -> Polygon:
     """
@@ -67,7 +67,7 @@ def translate_polygon_xy_to_index(
     relative to the provided raster file.
 
     Parameters:
-        source_path: PathLike
+        source_path: StrPathLike
             Path to the GeoTIFF raster file used for coordinate transformations.
         polygon: Polygon | str | list
             The input polygon in geospatial (XY) coordinates. Can be:
@@ -82,11 +82,13 @@ def translate_polygon_xy_to_index(
         ValueError: If the polygon cannot be normalized or processed.
     """
     polygon = normalize_polygon(polygon)
+    if not polygon.is_valid:
+        raise InvalidGeometryError("Polygon does not have valid geometry")
     return __translate_polygon(source_path, polygon, "index")
 
 
 def translate_polygon_index_to_xy(
-    source_path: PathLike,
+    source_path: StrPathLike,
     polygon: Polygon | str | list,
 ) -> Polygon:
     """
@@ -94,7 +96,7 @@ def translate_polygon_index_to_xy(
     relative to the provided raster file.
 
     Parameters:
-        source_path: PathLike
+        source_path: StrPathLike
             Path to the GeoTIFF raster file used for coordinate transformations.
         polygon: Polygon | str | list
             The input polygon in pixel index coordinates. Can be:
@@ -109,4 +111,6 @@ def translate_polygon_index_to_xy(
         ValueError: If the polygon cannot be normalized or processed.
     """
     polygon = normalize_polygon(polygon)
+    if not polygon.is_valid:
+        raise InvalidGeometryError("Polygon does not have valid geometry")
     return __translate_polygon(source_path, polygon, "xy")

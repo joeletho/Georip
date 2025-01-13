@@ -9,13 +9,12 @@ from tqdm.auto import trange
 from ftcnn.datasets.tools import make_ndvi_difference_dataset
 from ftcnn.datasets.utils import (
     TMP_FILE_PREFIX,
-    gdf_ndvi_validate_years_as_ints,
     postprocess_geo_source,
     preprocess_geo_source,
 )
-from ftcnn.geospacial.utils import encode_classes
+from ftcnn.geospacial.utils import encode_classes, gdf_ndvi_validate_years_as_ints
 from ftcnn.io import save_as_csv, save_as_gpkg, save_as_shp
-from ftcnn.utils import FTCNN_TMP_DIR
+from ftcnn.utils import _WRITE_LOCK, FTCNN_TMP_DIR
 
 
 def build_ndvi_difference_dataset(config: dict[str, Any]):
@@ -68,6 +67,7 @@ def build_ndvi_difference_dataset(config: dict[str, Any]):
         save_as_shp(source, source_path)
 
     source_path = preprocess_geo_source(source_path, geometry_column)
+
     if not isinstance(region_column, list):
         region_column = [region_column]
 
@@ -115,10 +115,13 @@ def build_ndvi_difference_dataset(config: dict[str, Any]):
 
         sample_size = int(len(truth_gdf) * background_ratio)
         background_gdf = background_gdf.sample(n=sample_size)
+
+        lock_id = _WRITE_LOCK.acquire()
         print(
             f"Number of labeled images: {len(truth_gdf)}\n"
             f"Number of background images: {len(background_gdf)}"
         )
+        _WRITE_LOCK.free(lock_id)
         gdf = gpd.GeoDataFrame(pd.concat([truth_gdf, background_gdf]), crs=gdf.crs)
 
     pbar.set_description("Creating NDVI Difference dataset - Finishing up")

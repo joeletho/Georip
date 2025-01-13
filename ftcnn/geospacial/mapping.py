@@ -1,5 +1,4 @@
 import sys
-from os import PathLike
 from pathlib import Path
 from typing import Union
 
@@ -16,6 +15,7 @@ from ftcnn.geospacial.utils import stem_contains_region_and_years, stem_contains
 from ftcnn.io import collect_files_with_suffix
 from ftcnn.raster import create_window
 from ftcnn.raster.utils import get_rows_cols_min_max_bounds
+from ftcnn.utils import StrPathLike
 from ftcnn.utils.pandas import extract_fields, normalize_fields
 
 
@@ -42,7 +42,7 @@ def update_metadata_region_name_and_years(
 
 def map_metadata(
     gdf_src: gpd.GeoDataFrame,
-    images_dir: PathLike,
+    images_dir: StrPathLike,
     region_column: str | list[str],
     start_year_column: str,
     end_year_column: str,
@@ -56,7 +56,7 @@ def map_metadata(
 
     Parameters:
         gdf_src (gpd.GeoDataFrame): Source GeoDataFrame containing metadata.
-        img_dir (PathLike): Directory containing image files.
+        img_dir (StrPathLike): Directory containing image files.
         parse_filename (Callable): Function to derive filenames from GeoDataFrame rows.
         preserve_fields (Union[List[Union[str, Dict[str, str]]], Dict[str, str]], optional):
             Specifies fields to preserve from the original GeoDataFrame.
@@ -202,7 +202,7 @@ def map_metadata(
 
 def map_geometry_to_geotiffs(
     gdf: gpd.GeoDataFrame,
-    image_paths: list[PathLike],
+    image_paths: list[StrPathLike],
     preserve_fields: list[str | dict[str, str]] | None = None,
 ) -> gpd.GeoDataFrame:
     """
@@ -210,7 +210,7 @@ def map_geometry_to_geotiffs(
 
     Parameters:
         gdf (gpd.GeoDataFrame): The GeoDataFrame containing geometries to map.
-        images_dir (PathLike): The directory containing GeoTIFF files to map geometries to.
+        images_dir (StrPathLike): The directory containing GeoTIFF files to map geometries to.
         recurse (bool): Whether to search for GeoTIFFs recursively within the directory. Defaults to True.
         **kwargs: Additional arguments, including `preserve_fields` for retaining specific fields.
 
@@ -262,12 +262,12 @@ def map_geometry_to_geotiffs(
     result_gdf = gpd.GeoDataFrame.from_dict(rows, geometry=geometry, crs=gdf.crs)
 
     # Explode multi-part geometries and drop duplicates
-    return gpd.GeoDataFrame(result_gdf.explode().drop_duplicates())
+    return gpd.GeoDataFrame(result_gdf.explode(ignore_index=True).drop_duplicates())
 
 
 def map_geometries_by_year_span(
     gdf: gpd.GeoDataFrame,
-    images_dir: PathLike,
+    images_dir: StrPathLike,
     start_year_col: str,
     end_year_col: str,
     preserve_fields: list[str | dict[str, str]] | None = None,

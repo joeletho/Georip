@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from os import PathLike
 from pathlib import Path
+from time import time
 from typing import Callable
 
 import geopandas as gpd
@@ -9,6 +9,7 @@ from tqdm.auto import trange
 
 from ftcnn.datasets.utils import (
     TMP_FILE_PREFIX,
+    StrPathLike,
     cleanup_unused_tiles,
     init_dataset_filepaths,
 )
@@ -27,12 +28,12 @@ from ftcnn.io import (
     save_as_shp,
 )
 from ftcnn.raster.tools import create_raster_tiles, process_raster_to_png_conversion
-from ftcnn.utils import NUM_CPU
+from ftcnn.utils import NUM_CPU, TQDM_INTERVAL
 
 
 def preprocess_ndvi_difference_dataset(
     gdf: gpd.GeoDataFrame,
-    output_dir: PathLike,
+    output_dir: StrPathLike,
     years: tuple[int, int] | None = None,
     img_path_col: str = "path",
     start_year_col: str = "start_year",
@@ -44,7 +45,7 @@ def preprocess_ndvi_difference_dataset(
 
     Parameters:
         gdf (GeoDataFrame): The GeoDataFrame containing metadata for the NDVI images.
-        output_dir (PathLike): The directory to store the output data.
+        output_dir (StrPathLike): The directory to store the output data.
         years (tuple[int, int] | None, optional): A tuple of years to filter images. Defaults to None (all years).
         img_path_col (str, optional): The column containing the image file paths. Defaults to 'path'.
         start_year_col (str, optional): The column for the start year. Defaults to 'StartYear'.
@@ -97,7 +98,7 @@ def preprocess_ndvi_difference_dataset(
 
 def preprocess_ndvi_difference_rasters(
     gdf: gpd.GeoDataFrame,
-    output_dir: PathLike,
+    output_dir: StrPathLike,
     *,
     years: tuple[int, int] | None = None,
     img_path_col: str = "path",
@@ -110,14 +111,14 @@ def preprocess_ndvi_difference_rasters(
     clean_dest: bool = False,
     leave: bool = True,
     num_workers: int | None = None,
-    preserve_fields: list[str | dict[str, str]] | None = None,
+    preserve_fields: list[dict[str, str]] | None = None,
 ) -> gpd.GeoDataFrame:
     """
     Preprocesses the NDVI difference rasters by creating tiles and mapping geometry to the corresponding GeoTIFFs.
 
     Parameters:
         gdf (GeoDataFrame): The GeoDataFrame containing metadata and geometry.
-        output_dir (PathLike): The directory to store output tiles and results.
+        output_dir (StrPathLike): The directory to store output tiles and results.
         years (tuple[int, int] | None, optional): The years to filter the images. Defaults to None (all years).
         img_path_col (str, optional): The column containing the image file paths. Defaults to 'path'.
         start_year_col (str, optional): The column for the start year. Defaults to 'start_year'.
@@ -144,7 +145,7 @@ def preprocess_ndvi_difference_rasters(
         end_year_col,
         clean_dest,
     )
-    tiles_dir = output_dir
+    tiles_dir = Path(output_dir)
 
     tile_size = tile_size if tile_size is not None else (None, None)
     if not isinstance(tile_size, tuple):
@@ -156,7 +157,13 @@ def preprocess_ndvi_difference_rasters(
         leave=leave,
     )
 
-    num_workers = num_workers if num_workers else NUM_CPU
+    num_workers = (
+        num_workers if num_workers and isinstance(num_workers, int) else NUM_CPU
+    )
+
+    start = time()
+    updates = 0
+    total_updates = len(target_imgs)
 
     # Make the tiles for each GeoTIFF
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
@@ -176,7 +183,12 @@ def preprocess_ndvi_difference_rasters(
             exception = future.exception()
             if exception:
                 raise exception
-            pbar.update()
+            if time() - start >= TQDM_INTERVAL * num_workers:
+                updates += 1
+                start = time()
+                pbar.update()
+        if updates < total_updates:
+            pbar.update(total_updates - updates)
 
     mapped_gdfs = map_geometries_by_year_span(
         gdf,
@@ -195,17 +207,34 @@ def preprocess_ndvi_difference_rasters(
 
     pbar.update()
 
-    num_tiles = len(
+    num_tiles_before = len(
         [
             str(path)
-            for path in collect_files_with_suffix(".tif", tiles_dir, recurse=True)
+            for path in collect_files_with_suffix(
+                [".tif", ".tiff"], tiles_dir, recurse=True
+            )
         ]
     )
     pbar.update()
     pbar.close()
 
-    num_tiles -= len(cleanup_unused_tiles(gdf, geom_col, img_path_col).keys())
-    print("Processed {0} images and saved to {1}".format(max(0, num_tiles), tiles_dir))
+    gdf = cleanup_unused_tiles(gdf, geom_col, img_path_col)
+
+    num_tiles_after = len(
+        [
+            str(path)
+            for path in collect_files_with_suffix(
+                [".tif", ".tiff"], tiles_dir, recurse=True
+            )
+        ]
+    )
+
+    num_diff = num_tiles_before - num_tiles_after
+    print(
+        "Processed {0} images and saved to {1}".format(
+            max(0, num_tiles_before - num_diff), tiles_dir
+        )
+    )
 
     return gpd.GeoDataFrame(
         gdf.drop_duplicates()
@@ -215,9 +244,9 @@ def preprocess_ndvi_difference_rasters(
 
 
 def make_ndvi_difference_dataset(
-    source_shp: str | PathLike,
-    source_images_dir: str | PathLike,
-    output_dir: str | PathLike,
+    source_shp: StrPathLike,
+    source_images_dir: StrPathLike,
+    output_dir: StrPathLike,
     *,
     years: tuple[int, int] | None = None,
     region_col: str | list[str] = "region",
@@ -234,15 +263,15 @@ def make_ndvi_difference_dataset(
     convert_to_png: bool = True,
     pbar_leave: bool = True,
     num_workers: int | None = None,
-    preserve_fields: list[str | dict[str, str]] | None = None,
+    preserve_fields: list[dict[str, str]] | None = None,
 ) -> tuple[str, gpd.GeoDataFrame]:
     """
     Creates an NDVI difference dataset by processing a shapefile and the associated NDVI image files.
 
     Parameters:
-        source_shp (PathLike): Path to the source shapefile containing metadata and geometry.
-        images_dir (PathLike): Directory containing the NDVI image files.
-        output_dir (PathLike): The directory where the processed dataset will be saved.
+        source_shp (StrPathLike): Path to the source shapefile containing metadata and geometry.
+        images_dir (StrPathLike): Directory containing the NDVI image files.
+        output_dir (StrPathLike): The directory where the processed dataset will be saved.
         years (tuple[int, int] | None, optional): A tuple of years to filter the images. Defaults to None (all years).
         start_year_col (str, optional): The column for the start year. Defaults to 'start_year'.
         end_year_col (str, optional): The column for the end year. Defaults to 'end_year'.
@@ -398,6 +427,8 @@ def make_ndvi_difference_dataset(
         pbar.set_description("Creating NDVI dataset - Translating xy coords to index")
 
         gdf = translate_xy_coords_to_index(gdf)
+        gdf = cleanup_unused_tiles(gdf, geom_col, "path")
+
         if save_csv or save_shp:
             ds_name = str(ds_name).replace("_xy", "_indexed")
             if not ds_name.endswith("_indexed"):
@@ -415,6 +446,7 @@ def make_ndvi_difference_dataset(
                     gdf,
                     shp_dir / ds_name.with_suffix(".gpkg"),
                 )
+
     if convert_to_png:
         pbar.update()
         pbar.set_description("Creating NDVI dataset - Converting GeoTIFFs to PNGs")
@@ -445,6 +477,7 @@ def make_ndvi_difference_dataset(
                     gdf,
                     shp_dir / ds_name.with_suffix(".gpkg"),
                 )
+
     pbar.update()
     pbar.set_description("Creating NDVI dataset - Complete")
     pbar.close()

@@ -1,24 +1,25 @@
 import os
 import time
-from os import PathLike
 from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
+from rasterio import rasterio
 
+from ftcnn.geometry.polygons import is_sparse_polygon
 from ftcnn.geospacial import DataFrameLike
 from ftcnn.io import clear_directory, save_as_shp
 from ftcnn.io.geospacial import load_shapefile
-from ftcnn.utils import FTCNN_TMP_DIR
+from ftcnn.utils import FTCNN_TMP_DIR, StrPathLike
 
 TMP_FILE_PREFIX = "tmp__"
 
 
 def init_dataset_filepaths(
     *,
-    source_shp: str | PathLike,
-    source_images_dir: str | PathLike,
-    output_dir: str | PathLike,
+    source_shp: StrPathLike,
+    source_images_dir: StrPathLike,
+    output_dir: StrPathLike,
     save_csv: bool = True,
     save_shp: bool = True,
     save_gpkg: bool = True,
@@ -61,7 +62,7 @@ def cleanup_unused_tiles(
     gdf: gpd.GeoDataFrame, geom_col: str, img_path_col: str
 ) -> gpd.GeoDataFrame:
     """
-    Removes unused tiles (files and empty directories) based on a GeoDataFrame.
+    Removes invalid geometries and associated files, and cleans up empty directories.
 
     Parameters:
         gdf (GeoDataFrame): The GeoDataFrame containing geometry and image paths.
@@ -69,27 +70,70 @@ def cleanup_unused_tiles(
         img_path_col (str): The column name in `gdf` that contains image paths.
 
     Returns:
-        GeoDataFrame: The updated GeoDataFrame with non-empty geometries.
+        GeoDataFrame: The updated GeoDataFrame with valid geometries and cleaned-up paths.
     """
-    unused_tiles = []
+    image_paths = gdf[img_path_col].unique().tolist()
+    gdf = gdf.explode(ignore_index=True)
 
-    # Remove any tiles that do not map to an image in the dataframe
-    unused_tiles = gdf.loc[gdf[geom_col].is_empty, img_path_col].unique().tolist()
-    gdf = gpd.GeoDataFrame(gdf[~gdf[geom_col].is_empty].reset_index(drop=True))
+    for path in image_paths:
+        # Filter geometries associated with the current image path
+        path_mask = gdf[img_path_col] == path
+        geometries = gdf.loc[path_mask, geom_col]
 
-    for path in unused_tiles:
-        path = Path(path)
-        parent = path.parent
-        if path.exists():
-            os.remove(path)
-        if parent.exists() and len(os.listdir(parent)) == 0:
-            os.rmdir(parent)
+        # Remove invalid geometries
+        sparse_mask = geometries.apply(is_sparse_polygon)
+        gdf = gdf.drop(gdf.loc[path_mask & sparse_mask].index).reset_index(drop=True)
 
+        # Check if the path still has valid references
+        if gdf.loc[gdf[img_path_col] == path].empty:
+            filepath = Path(path)
+            if filepath.exists():
+                os.remove(filepath)
+                parent = filepath.parent
+                if parent.exists() and len(os.listdir(parent)) == 0:
+                    os.rmdir(parent)
     return gdf
 
 
+# def cleanup_unused_tiles(
+#     gdf: gpd.GeoDataFrame, geom_col: str, img_path_col: str
+# ) -> gpd.GeoDataFrame:
+#     """
+#     Removes unused tiles (files and empty directories) based on a GeoDataFrame.
+#
+#     Parameters:
+#         gdf (GeoDataFrame): The GeoDataFrame containing geometry and image paths.
+#         geom_col (str): The column name in `gdf` that contains geometries.
+#         img_path_col (str): The column name in `gdf` that contains image paths.
+#
+#     Returns:
+#         GeoDataFrame: The updated GeoDataFrame with non-empty geometries.
+#     """
+#     unused_tiles = []
+#
+#     # Remove any tiles that do not map to an image in the dataframe
+#     sparse_mask = gdf[geom_col].apply(is_sparse_polygon)
+#     unused_tiles = gdf.loc[sparse_mask, img_path_col].unique().tolist()
+#     gdf = gpd.GeoDataFrame(gdf[~sparse_mask].reset_index(drop=True))
+#
+#     for path in unused_tiles:
+#         path = Path(path)
+#         parent = path.parent
+#         if path.exists():
+#             os.remove(path)
+#             if (gdf[img_path_col] == path).any():
+#                 gdf = gdf.drop(
+#                     gdf.loc[gdf[img_path_col] == path].index.tolist()
+#                 ).reset_index(drop=True)
+#         if parent.exists() and len(os.listdir(parent)) == 0:
+#             os.rmdir(parent)
+#
+#     return gdf
+#
+
+
 def preprocess_geo_background_source(
-    background: None | bool | str | PathLike | gpd.GeoDataFrame,
+    background: None | bool | StrPathLike | gpd.GeoDataFrame,
     geometry_column: str,
 ) -> bool | Path:
     """
@@ -99,7 +143,7 @@ def preprocess_geo_background_source(
         background: The input background, which can be:
             - None: Indicates no background data.
             - bool: A flag indicating whether background data is present.
-            - str | PathLike: A file path to a shapefile (.shp).
+            - StrPathLike: A file path to a shapefile (.shp).
             - GeoDataFrame: A GeoDataFrame containing background data.
         geometry_column: The name of the column containing geometry data.
 
@@ -117,7 +161,7 @@ def preprocess_geo_background_source(
 
 
 def preprocess_geo_source(
-    source: str | PathLike | gpd.GeoDataFrame,
+    source: StrPathLike | gpd.GeoDataFrame,
     geometry_column: str,
 ) -> Path:
     def validate_geometry(gdf):
@@ -169,36 +213,3 @@ def postprocess_geo_source(
 ) -> None:
     if source.stem.startswith(TMP_FILE_PREFIX):
         source.unlink()
-
-
-def get_gdf_valid_geometry(gdf, geometry_column):
-    return gpd.GeoDataFrame(
-        gdf[(gdf[geometry_column].notnull() & ~gdf[geometry_column].is_empty)],
-        crs=gdf.crs,
-    )
-
-
-def gdf_ndvi_validate_years_as_ints(gdf, start_year_column, end_year_column):
-    """
-    Validates and converts the specified year columns in a GeoDataFrame to integers, handling invalid values.
-
-    Parameters:
-        gdf (GeoDataFrame): The GeoDataFrame containing the year columns to validate and convert.
-        start_year_column (str): The name of the column representing the start year.
-        end_year_column (str): The name of the column representing the end year.
-
-    Returns:
-        GeoDataFrame: The modified GeoDataFrame with the year columns converted to integers.
-    """
-    gdf = gdf.copy()
-
-    for col in [start_year_column, end_year_column]:
-        gdf[col] = pd.to_numeric(gdf[col], errors="coerce")
-        if gdf[col].isna().any():
-            print(
-                f"Warning: Found invalid entries in column '{col}', dropping rows with invalid values."
-            )
-            gdf = gdf.loc[gdf[col].notna()]
-        gdf[col] = gdf[col].astype(int)
-
-    return gdf

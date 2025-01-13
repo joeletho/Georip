@@ -1,17 +1,18 @@
-from os import PathLike
 from pathlib import Path
 
 import geopandas as gpd
 from osgeo import gdal
 from shapely import wkt
 
+from ftcnn.utils import StrPathLike
 
-def load_geo_dataframe(path: PathLike) -> gpd.GeoDataFrame:
+
+def load_geo_dataframe(path: StrPathLike) -> gpd.GeoDataFrame:
     """
     Load spatial data into a GeoDataFrame from various file formats.
 
     Parameters:
-        path (PathLike): The file path to load data from. Supported formats: CSV, Shapefile, GeoPackage.
+        path (StrPathLike): The file path to load data from. Supported formats: CSV, Shapefile, GeoPackage.
 
     Returns:
         gpd.GeoDataFrame: A GeoDataFrame containing the loaded spatial data.
@@ -33,12 +34,12 @@ def load_geo_dataframe(path: PathLike) -> gpd.GeoDataFrame:
     return gpd_df
 
 
-def open_geo_dataset(path: str | Path) -> gdal.Dataset:
+def open_geo_dataset(path: StrPathLike) -> gdal.Dataset:
     """
     Open a geospatial dataset using GDAL.
 
     Parameters:
-        path (str | Path): The file path to the geospatial dataset.
+        path (StrPathLike): The file path to the geospatial dataset.
 
     Returns:
         gdal.Dataset | None: The GDAL Dataset object if successful, otherwise None.
@@ -57,7 +58,7 @@ def open_geo_dataset(path: str | Path) -> gdal.Dataset:
     return gdal.Open(path)
 
 
-def load_shapefile(path: PathLike) -> gpd.GeoDataFrame:
+def load_shapefile(path: StrPathLike) -> gpd.GeoDataFrame:
     """
     Loads a shapefile or CSV file containing geometry data and returns it as a GeoDataFrame.
 
@@ -67,7 +68,7 @@ def load_shapefile(path: PathLike) -> gpd.GeoDataFrame:
     - If the file is a shapefile, it is directly loaded as a GeoDataFrame.
 
     Parameters:
-        path (PathLike): Path to the shapefile or CSV file to load.
+        path (StrPathLike): Path to the shapefile or CSV file to load.
 
     Returns:
         gpd.GeoDataFrame: A GeoDataFrame containing the data from the input file, with geometries

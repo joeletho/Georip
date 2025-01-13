@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from time import time
 
 import geopandas as gpd
 import pandas as pd
@@ -37,14 +37,16 @@ def geodataframe_to_yolo(gdf: gpd.GeoDataFrame, compile=True) -> YOLODatasetBase
     gdf["geometry"] = gdf["geometry"].apply(
         lambda x: stringify_points(x.exterior.coords)
     )
-    tmp_path = FTCNN_TMP_DIR / f"{TMP_FILE_PREFIX}yolo_ds_{datetime.now()}.csv"
+    tmp_path = FTCNN_TMP_DIR / f"{TMP_FILE_PREFIX}yolo_ds_{time()}.csv"
     gdf.to_csv(tmp_path)
+    num_workers = NUM_CPU
+
     try:
         ds = YOLODatasetBase.from_csv(
             tmp_path,
             segments_key="geometry",
             convert_bounds_to_bbox=True,
-            num_workers=NUM_CPU,
+            num_workers=num_workers,
             compile=compile,
         )
         if os.path.isfile(tmp_path):
