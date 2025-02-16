@@ -46,19 +46,23 @@ def build_ndvi_difference_dataset(config: dict[str, Any]):
     if background_filter is not None and background_ratio <= 0:
         raise ValueError("Background ratio must be greater than 0")
 
-    total_updates = 3
+    total_updates = 4
+    total_updates += 1 if config["background_shapefile"] else 0
     pbar = trange(
         total_updates,
-        desc="Creating NDVI Difference dataset",
         leave=pbar_leave,
     )
     timestamp = f"{time.time()}"
     timestamp = timestamp[: timestamp.find(".")]
 
     if config["background_shapefile"]:
+        pbar.set_description("Merging source and background data")
         source_path = merge_source_and_background(config)
+        pbar.update()
     else:
         source_path = shapefile
+
+    pbar.set_description("Preprocessing shapefile")
 
     if isinstance(shapefile, pd.DataFrame) or isinstance(shapefile, gpd.GeoDataFrame):
         gdf_ndvi_validate_years_as_ints(
@@ -85,6 +89,9 @@ def build_ndvi_difference_dataset(config: dict[str, Any]):
         if not isinstance(preserve_fields, list):
             preserve_fields = [preserve_fields]
         preserve_fields.extend(region_column)
+
+    pbar.update()
+    pbar.set_description("Creating NDVI Difference dataset")
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(
