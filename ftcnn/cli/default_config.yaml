@@ -30,6 +30,9 @@ geometry_column: 'geometry'  # e.g., 'geometry'
 # Range of years to compute NDVI difference (start, end). Set to null to compute differences between sequential years.
 years: null  # e.g., '[2015, 2016]'
 
+# Path to the shapefile containing background data. If provided, the file will be prepared and merged with the source shapefile before being passed to the program.
+background_shapefile: ''  # e.g., 'path/to/background_shapefile.shp'
+
 # Ratio for selecting background data, typically between 0 and 1.
 background_ratio: 1.0  # e.g., 0.5 for 50% background data
 

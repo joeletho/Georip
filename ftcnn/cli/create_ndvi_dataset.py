@@ -5,6 +5,10 @@ from importlib import import_module, util
 from importlib.abc import InspectLoader
 from pathlib import Path
 
+import geopandas as gpd
+import pandas as pd
+import rasterio
+import shapely
 import yaml
 
 dirpath = Path(__file__).parent.resolve()
@@ -14,6 +18,7 @@ package_path = str(dirpath.parent.parent)
 if package_path not in sys.path:
     sys.path.append(package_path)
 
+from ftcnn import io
 from ftcnn.datasets import YOLONDVIDifferenceDataset
 
 DEFUALT_CONFIG_PATH = dirpath / "default_config.yaml"
@@ -114,13 +119,11 @@ def setup_parser():
     parser = argparse.ArgumentParser(
         description="FTCNN CLI for creating geospatial dataset for YOLO"
     )
-
     parser.add_argument(
         "source",
         type=parse_pathlike,
         help="Path to a YAML data file containing all configuration parameters or the input shapefile (.shp) containing data",
     )
-
     parser.add_argument(
         "--image_dir",
         type=Path,
@@ -156,6 +159,12 @@ def setup_parser():
     )
 
     # Optional arguments
+    parser.add_argument(
+        "--background_shapefile",
+        type=parse_pathlike,
+        default=None,
+        help="Path to a shapefile (.shp) containing background data. The data will be processed and merged with the source shapefile before being passed to the program.",
+    )
     parser.add_argument("--geometry_column", type=str, help="Column for geometry")
 
     parser.add_argument("--background_ratio", type=float, help="Background ratio")
@@ -312,6 +321,7 @@ def main():
         class_names=args.class_names,
         geometry_column=args.geometry_column,
         years=args.years,
+        background_shapefile=args.background_shapefile,
         background_ratio=args.background_ratio,
         background_filter=args.background_filter,
         background_seed=args.background_seed,
