@@ -33,9 +33,8 @@ years: null  # e.g., '[2015, 2016]'
 # Ratio for selecting background data, typically between 0 and 1.
 background_ratio: 1.0  # e.g., 0.5 for 50% background data
 
-# Path to the background filter callback function, or set to null if not used.
-background_filter: null  # e.g., 'path/to/module.func_name'
-
+# Path to the background filter callback function, a boolean true to use a default filter, or set to null if not used.
+background_filter: null  # e.g., 'path/to/module.func_name' or true
 
 # Seed value for background generation, or null to disable.
 background_seed: null  # e.g., 42 for reproducibility or null

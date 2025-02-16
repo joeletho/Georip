@@ -279,11 +279,14 @@ def parse_args(parser):
                 setattr(args, key, value)
 
     if args.background_filter:
-        setattr(
-            args,
-            "background_filter",
-            import_function(args.background_filter.path, args.background_filter.name),
-        )
+        if not isinstance(args.background_filter, bool):
+            setattr(
+                args,
+                "background_filter",
+                import_function(
+                    args.background_filter.path, args.background_filter.name
+                ),
+            )
     if args.class_encoder:
         setattr(
             args,
