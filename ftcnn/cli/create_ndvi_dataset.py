@@ -146,6 +146,14 @@ def setup_parser():
     parser.add_argument("--region_column", type=str, help="Column for regions")
     parser.add_argument("--year_start_column", type=str, help="Column for start year")
     parser.add_argument("--year_end_column", type=str, help="Column for end year")
+    parser.add_argument(
+        "--class_column", type=str, help="Column containing the class names"
+    )
+    parser.add_argument(
+        "--class_names",
+        type=lambda names: [name for name in names.split(",")],
+        help="A single or comma-separated list of the dataset class names",
+    )
 
     # Optional arguments
     parser.add_argument("--geometry_column", type=str, help="Column for geometry")
@@ -252,6 +260,8 @@ def parse_args(parser):
             "region_column",
             "year_start_column",
             "year_end_column",
+            "class_column",
+            "class_names",
         ]
         missing_args = [arg for arg in required_args if getattr(args, arg) is None]
 
@@ -295,6 +305,8 @@ def main():
         region_column=args.region_column,
         year_start_column=args.year_start_column,
         year_end_column=args.year_end_column,
+        class_column=args.class_column,
+        class_names=args.class_names,
         geometry_column=args.geometry_column,
         years=args.years,
         background_ratio=args.background_ratio,

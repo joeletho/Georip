@@ -18,6 +18,12 @@ year_start_column: ''  # e.g., 'StartYear'
 # Column name for the end year in the shapefile. This is a required argument and should be specified when running the CLI.
 year_end_column: ''  # e.g., 'EndYear'
 
+# Column name for the class names in the shapefile. This is a required argument and should be specified when running the CLI.
+class_column: ''  # e.g., 'class'
+
+# A single or list of class names in the shapefile. This is a required argument and should be specified when running the CLI.
+class_names: null  # e.g., 'person' or ['person', 'dog', 'cat']
+
 # Column name for the geometry data in the shapefile (default is 'geometry').
 geometry_column: 'geometry'  # e.g., 'geometry'
 
