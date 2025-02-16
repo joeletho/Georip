@@ -1,21 +1,23 @@
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 import shapely
-from rasterio import rasterio
+from rasterio import DatasetReader, rasterio
 from shapely import MultiPolygon, Polygon
+from tqdm.auto import trange
 
 from ftcnn.geometry import PolygonLike
 from ftcnn.geometry.polygons import get_polygon_points, is_sparse_polygon
 from ftcnn.geospacial import DataFrameLike
-from ftcnn.geospacial.conversion import (
-    translate_polygon_index_to_xy,
-    translate_polygon_xy_to_index,
-)
+from ftcnn.geospacial.conversion import (translate_polygon_index_to_xy,
+                                         translate_polygon_xy_to_index)
+from ftcnn.raster import create_window
 from ftcnn.utils import StrPathLike
 
 
@@ -31,26 +33,6 @@ def collect_filepaths(df: DataFrameLike, column_name: str) -> list[str]:
         list[str]: A list of file paths extracted from the specified column.
     """
     return list(df.loc[:, column_name].values())
-
-
-def encode_default_classes(row: pd.Series) -> tuple[int, str]:
-    """
-    Encodes default classes based on the geometry of a row.
-
-    Parameters:
-        row (pd.Series): A row from a DataFrame, expected to contain a "geometry" field.
-
-    Returns:
-        tuple[int, str]: A tuple containing:
-            - class_id (int): 0 for treatment, -1 for background.
-            - class_name (str): "Treatment" or "Background".
-    """
-    geom = row.get("geometry")
-    return (
-        (0, "Treatment")
-        if geom is not None and not geom.is_empty and geom.area > 1
-        else (-1, "Background")
-    )
 
 
 def tokenize_region_and_years_from_series(
@@ -136,46 +118,22 @@ def parse_region_and_years_from_path(
     return region, (int(years[0]), int(years[1]))
 
 
-def encode_classes(
-    df: DataFrameLike, encoder: Callable = encode_default_classes
-) -> DataFrameLike:
-    """
-    Adds encoded class information to a DataFrame.
-
-    Parameters:
-        df (DataFrameLike): The input DataFrame containing data to be encoded.
-        encoder (Callable): A function that encodes a row into class ID and class name.
-                            Defaults to `encode_default_classes`.
-
-    Returns:
-        DataFrameLike: A copy of the DataFrame with added "class_id" and "class_name" columns.
-    """
-    columns = {"class_id": [], "class_name": []}
-    for _, row in df.iterrows():
-        id, name = encoder(row)
-        columns["class_id"].append(id)
-        columns["class_name"].append(name)
-    df_encoded = df.copy()
-    df_encoded.insert(0, "class_id", columns["class_id"])
-    df_encoded.insert(1, "class_name", columns["class_name"])
-    return df_encoded
-
-
 def translate_xy_coords_to_index(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
     Translates XY coordinates to pixel indices for geometries in a GeoDataFrame.
 
     Parameters:
-        gdf (gpd.GeoDataFrame): A GeoDataFrame with a "path" column containing file paths
-                                and a "geometry" column with Polygon geometries.
+        gdf (gpd.GeoDataFrame): A GeoDataFrame with "dirpath" and "filename" columns containing file directory
+                                path and filename, and a "geometry" column with Polygon geometries.
 
     Returns:
         gpd.GeoDataFrame: A copy of the GeoDataFrame with updated "geometry" containing pixel indices.
     """
     gdf = gdf.copy()
     for i, row in gdf.iterrows():
-        if Path(str(row["path"])).exists() and isinstance(row["geometry"], Polygon):
-            polygon = translate_polygon_xy_to_index(row["path"], row["geometry"])
+        filepath = Path(row["dirpath"]) / row["filename"]
+        if filepath.exists() and isinstance(row["geometry"], Polygon):
+            polygon = translate_polygon_xy_to_index(filepath, row["geometry"])
             gdf.at[i, "geometry"] = Polygon(get_polygon_points(polygon))
     return gdf
 
@@ -185,16 +143,17 @@ def translate_index_coords_to_xy(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     Translates pixel indices to XY coordinates for geometries in a GeoDataFrame.
 
     Parameters:
-        gdf (gpd.GeoDataFrame): A GeoDataFrame with a "path" column containing file paths
-                                and a "geometry" column with Polygon geometries.
+        gdf (gpd.GeoDataFrame): A GeoDataFrame with "dirpath" and "filename" columns containing file directory
+                                path and filename, and a "geometry" column with Polygon geometries.
 
     Returns:
         gpd.GeoDataFrame: A copy of the GeoDataFrame with updated "geometry" containing XY coordinates.
     """
     gdf = gdf.copy()
     for i, row in gdf.iterrows():
-        if Path(str(row["path"])).exists() and isinstance(row["geometry"], Polygon):
-            polygon = translate_polygon_index_to_xy(row["path"], row["geometry"])
+        filepath = Path(row["dirpath"]) / row["filename"]
+        if filepath.exists() and isinstance(row["geometry"], Polygon):
+            polygon = translate_polygon_index_to_xy(filepath, row["geometry"])
             gdf.at[i, "geometry"] = Polygon(get_polygon_points(polygon))
     return gdf
 
@@ -465,3 +424,195 @@ def gdf_matches_image_crs(gdf, images: StrPathLike | list[StrPathLike]) -> bool:
 def gdf_set_crs_to_image(gdf: DataFrameLike, image: StrPathLike) -> None:
     with rasterio.open(image) as src:
         gdf.to_crs(src.crs, inplace=True)
+
+
+def get_image_windows(
+    image_path: Path, *, max_size: int = 4096
+) -> list[rasterio.windows.Window]:
+    """
+    Generates windows for splitting a large raster image into smaller tiles.
+
+    Parameters:
+        image_path (Path): Path to the input raster image.
+        max_size (int): Maximum size (width or height) for each subset.
+
+    Returns:
+        list[rasterio.windows.Window]: List of windows representing image subsets.
+    """
+    width = height = None
+    with rasterio.open(image_path) as src:
+        width, height = src.width, src.height
+    if width <= max_size and height <= max_size:
+        return [create_window(0, 0, width, height)]
+
+    windows = []
+    num_tiles_x = (width + max_size - 1) // max_size
+    num_tiles_y = (height + max_size - 1) // max_size
+
+    for i in range(num_tiles_x):
+        for j in range(num_tiles_y):
+            window = create_window(
+                i * max_size,
+                j * max_size,
+                min(max_size, width - i * max_size),
+                min(max_size, height - j * max_size),
+            )
+            windows.append(window)
+    return windows
+
+
+def get_src_data_nodata_transform(src):
+    nodata = src.nodata or (src.nodatavals[0] if src.nodatavals else None)
+    if nodata is None:
+        raise ValueError("Raster does not have a nodata value defined.")
+    data = src.read(1, masked=True)
+    transform = src.transform
+    return data, nodata, transform
+
+
+def clip_geometries_to_raster(
+    gdf: gpd.GeoDataFrame,
+    raster: StrPathLike | DatasetReader,
+    geometry_column: str = "geometry",
+) -> gpd.GeoDataFrame:
+    """
+    Clips geometries in a GeoDataFrame to exclude areas above nodata pixels in the raster,
+    while ensuring that geometries outside the raster are left unchanged.
+
+    Parameters:
+        gdf (gpd.GeoDataFrame): The input GeoDataFrame with geometries to be clipped.
+        raster (StrPathLike | DatasetReader): Path to the raster image or an open rasterio dataset.
+        geometry_column (str): Name of the column containing geometry.
+
+    Returns:
+        gpd.GeoDataFrame: A new GeoDataFrame with updated geometries clipped to non-nodata areas.
+    """
+    gdf = gdf.copy()
+    nodata = None
+    data = None
+
+    if isinstance(raster, StrPathLike):
+        with rasterio.open(raster) as src:
+            data, nodata, transform = get_src_data_nodata_transform(src)
+    elif isinstance(raster, rasterio.DatasetReader):
+        data, nodata, transform = get_src_data_nodata_transform(raster)
+    else:
+        raise ValueError(f"Invalid `raster` datatype '{type(raster)}'")
+
+    return clip_geometries_to_raster_by_parts(
+        gdf, data, nodata, transform, geometry_column=geometry_column
+    )
+
+
+def clip_geometries_to_raster_by_parts(
+    gdf, srcdata, srcnodata, srctransform, *, geometry_column="geometry"
+):
+    gdf = gdf.copy()
+    mask_shapes = rasterio.features.shapes(
+        srcdata, srcdata.mask, transform=srctransform
+    )
+    valid_polygons = [
+        shapely.geometry.shape(geom)
+        for geom, value in mask_shapes
+        if value != srcnodata
+    ]
+    combined_polygons = shapely.unary_union(valid_polygons)
+
+    def get_geom_or_intersection(geom):
+        intersection = geom.intersection(combined_polygons)
+        if not intersection.is_empty:
+            return intersection
+        return geom
+
+    gdf[geometry_column] = gdf[geometry_column].apply(get_geom_or_intersection)
+    return gdf
+
+
+def clip_geometries_to_raster_parallel(
+    gdf: gpd.GeoDataFrame,
+    raster_path: StrPathLike,
+    geometry_column: str = "geometry",
+    num_workers: int = 4,
+    max_rows: int = 100,
+) -> gpd.GeoDataFrame:
+    """
+    Clips geometries in a GeoDataFrame to exclude areas above nodata pixels in the raster, in parallel.
+
+    Parameters:
+        gdf (gpd.GeoDataFrame): The input GeoDataFrame with geometries to be clipped.
+        raster_path (StrPathLike): Path to the raster image.
+        geometry_column (str): Name of the column containing geometry.
+        num_workers (int): Number of threads to use for parallel processing.
+
+    Returns:
+        gpd.GeoDataFrame: A new GeoDataFrame with updated geometries clipped to non-nodata areas.
+    """
+    chunk_size = len(gdf) // max_rows
+    gdf_chunks = [gdf.iloc[i : i + chunk_size] for i in range(0, len(gdf), chunk_size)]
+
+    updated_gdf_list = []
+
+    pbar = trange(
+        len(gdf_chunks), desc=f"Processing {Path(raster_path).name}", leave=False
+    )
+
+    data = nodata = transform = None
+    with rasterio.open(raster_path, crs=gdf.crs) as src:
+        data, nodata, transform = get_src_data_nodata_transform(src)
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = []
+        for gdf_chunk in gdf_chunks:
+            futures.append(
+                executor.submit(
+                    clip_geometries_to_raster_by_parts,
+                    gdf_chunk,
+                    data,
+                    nodata,
+                    transform,
+                    geometry_column=geometry_column,
+                )
+            )
+
+        for future in as_completed(futures):
+            updated_gdf_list.append(future.result())
+            pbar.update()
+    pbar.close()
+    return gpd.GeoDataFrame(pd.concat(updated_gdf_list, ignore_index=True), crs=gdf.crs)
+
+
+def clip_geometries_to_rasters(
+    gdf: gpd.GeoDataFrame,
+    raster_paths: list[StrPathLike],
+    raster_path_column: str,
+    geometry_column: str = "geometry",
+) -> gpd.GeoDataFrame:
+    """
+    Clips geometries in a GeoDataFrame for each raster image in the raster_paths list.
+    It filters the gdf based on the image column, processes each image, and returns a new GeoDataFrame
+    containing the clipped geometries.
+
+    Parameters:
+        gdf (gpd.GeoDataFrame): The input GeoDataFrame with geometries to be clipped.
+        raster_paths (list[StrPathLike]): List of raster image paths.
+        raster_path_column (str): The name of the column containing the image paths in gdf.
+        geometry_column (str): The name of the geometry column in gdf.
+
+    Returns:
+        gpd.GeoDataFrame: A new GeoDataFrame with clipped geometries for each image.
+    """
+    gdf = gdf.copy()
+
+    for raster_path in raster_paths:
+        raster_gdf = gdf[
+            gdf[raster_path_column].apply(lambda path: Path(path) == Path(raster_path))
+        ]
+        if raster_gdf.empty:
+            continue
+        raster_gdf = raster_gdf.set_geometry(geometry_column)
+        clipped_gdf = clip_geometries_to_raster_parallel(
+            raster_gdf, raster_path, geometry_column
+        )
+        # Update the original gdf
+        gdf.loc[clipped_gdf.index, geometry_column] = clipped_gdf[geometry_column]
+    return gdf

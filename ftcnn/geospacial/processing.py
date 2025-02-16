@@ -1,6 +1,7 @@
 from typing import Union
 
 import geopandas as gpd
+from tqdm.auto import trange
 
 from ftcnn.geometry.polygons import flatten_polygons
 from ftcnn.geospacial.mapping import map_metadata
@@ -62,7 +63,10 @@ def preprocess_ndvi_shapefile(
         end_year = int(end_year)
         gdf = gdf[(gdf[start_year_col] >= start_year) & (gdf[end_year_col] <= end_year)]
 
-    gdf = flatten_polygons(gdf, group_by=[*region_col, start_year_col, end_year_col])
+    pbar = trange(2, desc="Flattening polygons and mapping metadata", leave=False)
+
+    gdf = flatten_polygons(gdf)
+    pbar.update()
 
     gdf = map_metadata(
         gdf,
@@ -72,8 +76,22 @@ def preprocess_ndvi_shapefile(
         end_year_column=end_year_col,
         preserve_fields=preserve_fields,
     )
+    pbar.update()
+
+    # print("After mapping metadata:\n", gdf)
+
+    # pbar.set_description("Clipping geometries within bounds of rasters")
+    # pbar.refresh()
+    #
+    # gdf = clip_geometries_to_rasters(gdf, base_images, "path")
+    # gdf = gdf[~gdf["geometry"].is_empty]
+    # pbar.update()
+
+    pbar.close()
+
+    # print("After clipping geometry:\n", gdf)
 
     if not len(gdf):
         raise ValueError("Shapefile does not contain valid metadata")
 
-    return gdf.explode(ignore_index=True)
+    return gdf

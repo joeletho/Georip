@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from ctypes import ArgumentError
 from enum import Enum
 from pathlib import Path
-from time import sleep
 from typing import Callable
 from xml.etree import ElementTree as ET
 
@@ -26,6 +25,7 @@ from torchvision.transforms import v2 as T
 from tqdm.auto import tqdm, trange
 
 from ftcnn.io import collect_files_with_suffix, pathify
+from ftcnn.utils import StrPathLike
 
 XYPair = tuple[float | int, float | int]
 XYInt = tuple[int, int]
@@ -145,7 +145,7 @@ class AnnotatedLabel(Serializable):
 
     @staticmethod
     def from_file(filepath: str | Path, image_filename="", class_name=""):
-        filepath = Path(filepath).resolve()
+        filepath = Path(filepath)
         annotations = []
         with open(filepath) as f:
             f.seek(0, os.SEEK_END)
@@ -219,6 +219,7 @@ def copy_images_and_labels(image_paths, label_paths, images_dest, labels_dest):
 
     nfiles = len(image_paths)
     pbar = tqdm(total=nfiles, desc="Copying labels and images", leave=False)
+
     for image_path in image_paths:
         found_label = False
         for label_path in label_paths:
@@ -581,6 +582,7 @@ def convert_segment_to_bbox(points: list[float]):
 
     return BBox(xmin, ymin, width, height)
 
+
 def plot_hist(img, bins=64):
     hist, bins = skimage.exposure.histogram(img, bins)
     f, a = plt.subplots()
@@ -589,25 +591,64 @@ def plot_hist(img, bins=64):
 
 
 def make_dataset(
-    images_dir,
-    labels_dir,
+    images_dir: StrPathLike,
+    labels_dir: StrPathLike,
     *,
-    image_format=["jpg", "png"],
-    label_format="txt",
-    split=0.75,
-    mode: DatasetSplitMode | str = DatasetSplitMode.All,  # Addtional args: 'collection'
-    shuffle=True,
-    recurse=True,
-    **kwargs,
-):
-    if kwargs.get("label_format"):
-        label_format = kwargs.pop("label_format")
-    if kwargs.get("image_format"):
-        image_format = kwargs.pop("image_format")
+    image_format: str | list[str] = ["jpg", "png"],
+    label_format: str = "txt",
+    train_split: float = 0.75,
+    test_split: float = 0.1,
+    stratify_split: bool = True,
+    class_data: (
+        dict[str, str | int] | None
+    ) = None,  # Class data required if stratify_split is True
+    mode: DatasetSplitMode | str = DatasetSplitMode.All,
+    shuffle: bool = True,
+    shuffle_seed: int | None = None,
+    recurse: bool = True,
+) -> tuple[
+    tuple[list[ImageData], list[AnnotatedLabel]],  # Train
+    tuple[list[ImageData], list[AnnotatedLabel]],  # Validation
+    tuple[list[ImageData], list[AnnotatedLabel]],  # Test
+]:
+    """
+    Creates and splits a dataset into train, validation, and test sets.
 
+    Args:
+        images_dir (StrPathLike): Directory containing image files.
+        labels_dir (StrPathLike): Directory containing label files.
+        image_format (str | list[str], optional): Image file format(s). Default is ["jpg", "png"].
+        label_format (str, optional): Label file format. Default is "txt".
+        train_split (float, optional): Proportion of data to use for training. Default is 0.75.
+        test_split (float, optional): Proportion of data to use for testing. Default is 0.1.
+        stratify_split (bool, optional): Whether to stratify splits by class. Default is True.
+        class_data (dict[str, str | int] | None, optional): A dictionary mapping filenames (without extensions)
+            to class identifiers for stratification. This is required if stratify_split is True.
+            Example: {"image1": 0, "image2": 1}.
+        mode (DatasetSplitMode | str, optional): Mode for splitting. Options are "all" or "collection".
+            Default is DatasetSplitMode.All.
+        shuffle (bool, optional): Whether to shuffle data before splitting. Default is True.
+        shuffle_seed (int | None, optional): Seed for shuffling. Default is None.
+        recurse (bool, optional): Whether to search directories recursively. Default is True.
+        **kwargs: Additional keyword arguments to configure file formats.
+
+    Returns:
+        tuple: A tuple containing train, validation, and test data in the form of
+        ((list[ImageData], list[AnnotatedLabel]), ...).
+
+    Raises:
+        FileNotFoundError: If no image or label files are found.
+        ValueError: If stratify_split is True but class_data is not provided.
+    """
     label_paths = collect_files_with_suffix(
         f".{label_format.lower()}", labels_dir, recurse=recurse
     )
+    if not label_paths:
+        raise FileNotFoundError(
+            f"No label files with format '{label_format}' found in '{labels_dir}'"
+        )
+    label_paths = list(set(label_paths))
+
     image_paths = []
     if not isinstance(image_format, list):
         image_format = [image_format]
@@ -616,40 +657,166 @@ def make_dataset(
             collect_files_with_suffix(f".{suffix.lower()}", images_dir, recurse=recurse)
         )
 
-    if shuffle:
-        random.shuffle(label_paths)
+    if not image_paths:
+        raise FileNotFoundError(
+            f"No image files with format(s) '{image_format}' found in '{images_dir}'"
+        )
+    image_paths = list(set(image_paths))
 
-    label_path_map = {path.stem: path for path in label_paths}
+    if shuffle:
+        rand = random.Random(shuffle_seed)
+        rand.shuffle(label_paths)
+
+    image_stem_path_map = {path.stem: path for path in image_paths}
+    unmatched_labels = []
 
     all_paths = []
-    for stem, label_path in label_path_map.items():
-        found = False
-        for image_path in image_paths:
-            if image_path.stem == stem:
-                all_paths.append(
-                    {
-                        "image": image_path,
-                        "label": label_path,
-                    }
+    for label_path in label_paths:
+        image_path = image_stem_path_map.get(label_path.stem)
+        if image_path:
+            if stratify_split and class_data is None:
+                raise ArgumentError(
+                    "`class_data` is required when `stratify_split` is True. Format contain 'image_stem': 'class_key' key:value pairs"
                 )
-                found = True
-                break
-        if not found:
-            print(f"Label for '{stem}' not found", file=sys.stderr)
-            label_paths.remove(label_path)
-            label_path.unlink()
+            class_value = class_data.get(image_path.name) if stratify_split else None
+            all_paths.append(
+                {"image": image_path, "label": label_path, "class_id": class_value}
+            )
+        else:
+            unmatched_labels.append(label_path)
+
+    if unmatched_labels:
+        print(f"Unmatched labels found: {len(unmatched_labels)}")
+        for path in unmatched_labels:
+            print(f"Unmatched label: {path}", file=sys.stderr)
 
     match (mode):
-        case DatasetSplitMode.All | 'all':
-            train_data, val_data = split_dataset(all_paths, split=split)
+        case DatasetSplitMode.All | "all":
+            train_data, val_data = split_dataset(
+                all_paths,
+                split=train_split,
+                stratify=stratify_split,
+                class_key="class_id" if stratify_split else None,
+            )
         case DatasetSplitMode.Collection | "collection":
-            train_data, val_data = split_dataset_by_collection(all_paths, split=split)
+            train_data, val_data = split_dataset_by_collection(
+                all_paths, split=train_split
+            )
         case _:
             raise ArgumentError(
                 f'Invalid mode argument "{mode}". Options are: "all", "collection".'
             )
 
-    return train_data, val_data
+    test_data = ([], [])
+    if len(val_data[0]) > 0 and test_split > 0:
+        split_paths = []
+        val_images = [Path(image.filepath) for image in val_data[0]]
+        for group in all_paths:
+            if group["image"] in val_images:
+                split_paths.append(group)
+
+        val_data, test_data = split_dataset(
+            split_paths,
+            split=1 - (test_split / (1 - train_split)),
+            stratify=stratify_split,
+            class_key="class_id" if stratify_split else None,
+        )
+
+    return train_data, val_data, test_data
+
+
+# def make_dataset(
+#     images_dir: StrPathLike,
+#     labels_dir: StrPathLike,
+#     *,
+#     image_format: str | list[str] = ["jpg", "png"],
+#     label_format: str = "txt",
+#     train_split: float = 0.75,
+#     test_split: float = 0.1,
+#     stratify_split: bool = True,
+#     mode: DatasetSplitMode | str = DatasetSplitMode.All,  # Addtional args: 'collection'
+#     shuffle: bool = True,
+#     shuffle_seed: int | None = None,
+#     recurse: bool = True,
+#     **kwargs,
+# ) -> tuple[
+#     tuple[list[ImageData], list[AnnotatedLabel]],  # Train
+#     tuple[list[ImageData], list[AnnotatedLabel]],  # Validation
+#     tuple[list[ImageData], list[AnnotatedLabel]],  # Test
+# ]:
+#     if kwargs.get("label_format"):
+#         label_format = kwargs.pop("label_format")
+#     if kwargs.get("image_format"):
+#         image_format = kwargs.pop("image_format")
+#
+#     label_paths = collect_files_with_suffix(
+#         f".{label_format.lower()}", labels_dir, recurse=recurse
+#     )
+#     if not label_paths:
+#         raise FileNotFoundError(
+#             f"No label files with format '{label_format}' found in '{labels_dir}'"
+#         )
+#
+#     image_paths = []
+#     if not isinstance(image_format, list):
+#         image_format = [image_format]
+#     for suffix in image_format:
+#         image_paths.extend(
+#             collect_files_with_suffix(f".{suffix.lower()}", images_dir, recurse=recurse)
+#         )
+#
+#     if not image_paths:
+#         raise FileNotFoundError(
+#             f"No image files with format(s) '{image_format}' found in '{images_dir}'"
+#         )
+#
+#     if shuffle:
+#         rand = random.Random(shuffle_seed)
+#         rand.shuffle(label_paths)
+#
+#     image_path_map = {path.stem: path for path in image_paths}
+#     unmatched_labels = []
+#
+#     all_paths = []
+#     for label_path in label_paths:
+#         image_path = image_path_map.get(label_path.stem)
+#         if image_path:
+#             all_paths.append({"image": image_path, "label": label_path})
+#         else:
+#             unmatched_labels.append(label_path)
+#
+#     if unmatched_labels:
+#         print(f"Unmatched labels found: {len(unmatched_labels)}")
+#         for path in unmatched_labels:
+#             print(f"Unmatched label: {path}", file=sys.stderr)
+#
+#     match (mode):
+#         case DatasetSplitMode.All | "all":
+#             train_data, val_data = split_dataset(
+#                 all_paths, split=train_split, stratify=stratify_split
+#             )
+#         case DatasetSplitMode.Collection | "collection":
+#             train_data, val_data = split_dataset_by_collection(
+#                 all_paths, split=train_split
+#             )
+#         case _:
+#             raise ArgumentError(
+#                 f'Invalid mode argument "{mode}". Options are: "all", "collection".'
+#             )
+#
+#     test_data = ([], [])
+#     if len(val_data[0]) > 0 and test_split > 0:
+#         val_data, test_data = split_dataset(
+#             [
+#                 {"image": Path(image.filepath), "label": Path(label.filepath)}
+#                 for image, label in zip(val_data[0], val_data[1])
+#             ],
+#             split=1 - (test_split / (1 - train_split)),
+#             stratify=stratify_split,
+#             class_key=
+#         )
+#
+#     return train_data, val_data, test_data
 
 
 def overlay_mask(image, mask, color, alpha, resize=None):
@@ -683,10 +850,15 @@ def overlay_mask(image, mask, color, alpha, resize=None):
     return image_combined
 
 
-def split_dataset_by_collection(image_label_paths, split=0.75):
+def split_dataset_by_collection(
+    image_label_paths: list[dict[str, StrPathLike]], split=0.75
+) -> tuple[
+    tuple[list[ImageData], list[AnnotatedLabel]],
+    tuple[list[ImageData], list[AnnotatedLabel]],
+]:
     collections = dict()
     for data in image_label_paths:
-        name = data.get("image").parent.name
+        name = Path(data.get("image")).parent.name
         if name not in collections.keys():
             collections[name] = []
         collections[name].append(data)
@@ -703,32 +875,177 @@ def split_dataset_by_collection(image_label_paths, split=0.75):
     return train_ds, val_ds
 
 
-def split_dataset(image_label_paths, split=0.75):
-    split = int(len(image_label_paths) * split)
-    train_images = []
-    train_labels = []
+def split_dataset(
+    image_label_paths: list[dict[str, StrPathLike | None]],
+    split: float = 0.75,
+    stratify: bool = False,
+    class_key: str | None = None,
+) -> tuple[
+    tuple[list[ImageData], list[AnnotatedLabel]],
+    tuple[list[ImageData], list[AnnotatedLabel]],
+]:
+    """
+    Split a dataset of image-label paths into training and validation sets.
+
+    Parameters:
+        image_label_paths (list): List of dictionaries with "image", "label", and optional class keys.
+        split (float): Fraction of data to use for training (0 to 1).
+        stratify (bool): Whether to maintain class proportions in the split.
+        class_key (str): Key used to access class grouping information in `image_label_paths`.
+
+    Returns:
+        tuple: ((train_images, train_labels), (val_images, val_labels))
+    """
+    if split <= 0:
+        raise ArgumentError("`split` must be positive")
+    if stratify and not class_key:
+        raise ArgumentError("`class_key` must be provided when stratify is True")
+
     stems = set()
-    for data in image_label_paths[:split]:
-        image = ImageData(data["image"])
-        image_stem = Path(image.filename).stem
-        if image_stem in stems:
-            continue
-        stems.add(image_stem)
-        train_images.append(image)
-        train_labels.extend(AnnotatedLabel.from_file(data["label"], image.filename))
 
-    val_images = []
-    val_labels = []
-    for data in image_label_paths[split:]:
-        image = ImageData(data["image"])
-        image_stem = Path(image.filename).stem
-        if image_stem in stems:
-            continue
-        stems.add(image_stem)
-        val_images.append(image)
-        val_labels.extend(AnnotatedLabel.from_file(data["label"], image.filename))
+    def process_subset(
+        data_subset: list[dict[str, StrPathLike]], stems: set
+    ) -> tuple[list[ImageData], list[AnnotatedLabel]]:
+        images = []
+        labels = []
+        for data in data_subset:
+            image_path = Path(data["image"])
+            if image_path.stem in stems:
+                continue
+            stems.add(image_path.stem)
+            image = ImageData(image_path)
+            images.append(image)
+            labels.extend(AnnotatedLabel.from_file(data["label"], image_path.name))
+        return images, labels
 
-    return (train_images, train_labels), (val_images, val_labels)
+    if stratify:
+        class_groups = dict()
+
+        for data in image_label_paths:
+            class_value = data.get(class_key)
+            if class_value is None:
+                raise ValueError(f"Missing `class_key` '{class_key}' in data: {data}")
+            if not class_groups.get(class_value):
+                class_groups[class_value] = []
+            class_groups[class_value].append(data)
+
+        a_data, b_data = [], []
+        for class_data in class_groups.values():
+            split_index = int(len(class_data) * split)
+            a_data.extend(class_data[:split_index])
+            b_data.extend(class_data[split_index:])
+    else:
+        split_index = int(len(image_label_paths) * split)
+        a_data = image_label_paths[:split_index]
+        b_data = image_label_paths[split_index:]
+
+    # Make sure there are no duplicates in either data
+    remove_alternating_duplicates(a_data, b_data, "image")
+
+    a_images, a_labels = process_subset(a_data, stems)
+    b_images, b_labels = process_subset(b_data, stems)
+
+    remove_alternating_duplicate_images_and_labels(
+        a_images, a_labels, b_images, b_labels
+    )
+
+    return (a_images, a_labels), (b_images, b_labels)
+
+
+def remove_alternating_duplicates(
+    a_data: list[dict], b_data: list[dict], key: str
+) -> None:
+    """
+    Removes duplicates alternately from a_data and b_data based on a specified key.
+
+    Args:
+        a_data (list[dict]): The first list of dictionaries.
+        b_data (list[dict]): The second list of dictionaries.
+        key (str): The key to compare values for duplicates.
+
+    Returns:
+        None: Modifies the lists in place.
+    """
+    dups = 0
+
+    for i in range(
+        len(b_data) - 1, -1, -1
+    ):  # Iterate in reverse to safely remove items
+        b_value = b_data[i][key]
+        for i, a in enumerate(a_data):
+            if a[key] == b_value:
+                if dups % 2 == 0:
+                    a_data.pop(i)
+                else:
+                    b_data.pop(i)
+                dups += 1
+                break
+
+
+def remove_alternating_duplicate_images_and_labels(
+    a_images: list[ImageData],
+    a_labels: list[AnnotatedLabel],
+    b_images: list[ImageData],
+    b_labels: list[AnnotatedLabel],
+):
+    seen_images = set()
+    toggle = True
+
+    def remove_labels_from_list(labels, filename):
+        for j in range(len(labels) - 1, -1, -1):
+            if labels[j].image_filename == filename:
+                del labels[j]
+
+    for image in a_images:
+        seen_images.add(image.filename)
+
+    for i in range(len(b_images) - 1, -1, -1):
+        filename = b_images[i].filename
+        if filename in seen_images:
+            if toggle:
+                del b_images[i]
+                remove_labels_from_list(b_labels, filename)
+            else:
+                for j in range(len(a_images) - 1, -1, -1):
+                    if a_images[j].filename == filename:
+                        del a_images[j]
+                        break
+                remove_labels_from_list(a_labels, filename)
+            toggle = not toggle
+
+    return a_images, a_labels, b_images, b_labels
+
+
+# def split_dataset(
+#     image_label_paths: list[dict[str, StrPathLike]],
+#     split: float = 0.75,
+#     stratify: bool = False,
+# ) -> tuple[
+#     tuple[list[ImageData], list[AnnotatedLabel]],
+#     tuple[list[ImageData], list[AnnotatedLabel]],
+# ]:
+#     split_index = int(len(image_label_paths) * split)
+#     stems = set()
+#
+#     def process_subset(
+#         data_subset: list[dict[str, StrPathLike]], stems: set
+#     ) -> tuple[list[ImageData], list[AnnotatedLabel]]:
+#         images = []
+#         labels = []
+#         foremove_alternating_duplicatesin data_subset:
+#             image = ImageData(data["image"])
+#             image_stem = Path(image.filename).stem
+#             if image_stem in stems:
+#                 continue
+#             stems.add(image_stem)
+#             images.append(image)
+#             labels.extend(AnnotatedLabel.from_file(data["label"], image.filename))
+#         return images, labels
+#
+#     a_images, a_labels = process_subset(image_label_paths[:split_index], stems)
+#     b_images, b_labels = process_subset(image_label_paths[split_index:], stems)
+#
+#     return (a_images, a_labels), (b_images, b_labels)
 
 
 def split_dataset_by_k_fold(k):

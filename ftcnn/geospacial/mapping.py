@@ -88,9 +88,9 @@ def map_metadata(
         region_column = [region_column]
 
     image_paths.sort(key=lambda p: p.stem)
-    gdf = gdf.sort_values(by=region_column).reset_index(drop=True)
-    rows = []
-    geometry = []
+    gdf = gdf.sort_values(
+        by=[*region_column, start_year_column, end_year_column]
+    ).reset_index(drop=True)
 
     field_map = dict()
     if preserve_fields:
@@ -100,7 +100,7 @@ def map_metadata(
         path_stem = filepath.stem
         metadata = {
             "filename": filepath.name,
-            "path": str(filepath),
+            "dirpath": str(filepath.parent),
             "width": None,
             "height": None,
             "bbox": None,
@@ -155,11 +155,14 @@ def map_metadata(
 
         for index in row_indices:
             row = gdf.iloc[index]
+
+            current_metadata = metadata.copy()
+
             if preserve_fields:
-                metadata.update(extract_fields(row, field_map))
+                current_metadata.update(extract_fields(row, field_map))
 
             update_metadata_region_name_and_years(
-                metadata,
+                current_metadata,
                 region_column,
                 start_year_column,
                 end_year_column,
@@ -168,13 +171,15 @@ def map_metadata(
                 end_year,
             )
 
-            metadata["bbox"] = row.get("bbox")
+            current_metadata["bbox"] = row.get("bbox")
             matching_geometry = row.get("geometry")
 
-            if row.get("bbox") is None and row.get("geometry") is not None:
-                metadata["bbox"] = shapely.box(*row.get("geometry").bounds)
+            if matching_geometry is None:
+                continue
+            if row.get("bbox") is None:
+                current_metadata["bbox"] = shapely.box(*matching_geometry.bounds)
 
-            rows.append(metadata)
+            rows.append(current_metadata)
             geometry.append(matching_geometry)
 
         gdf = gdf.drop(row_indices).reset_index(drop=True)
@@ -182,8 +187,8 @@ def map_metadata(
     if not len(rows):
         raise ValueError("No metadata found for mapping")
 
-    result = gpd.GeoDataFrame(
-        (
+    return (
+        gpd.GeoDataFrame(
             gpd.GeoDataFrame.from_dict(
                 rows,
                 geometry=geometry,
@@ -192,12 +197,10 @@ def map_metadata(
             .explode()
             .drop_duplicates()
             .reset_index(drop=True)
-        ),
-        geometry=geometry,
-        crs=gdf_src.crs,
+        )
+        .sort_values(by=[*region_column, "start_year", "end_year"])
+        .reset_index(drop=True)
     )
-
-    return result.sort_values(by=region_column).reset_index(drop=True)
 
 
 def map_geometry_to_geotiffs(
@@ -244,7 +247,7 @@ def map_geometry_to_geotiffs(
 
             row = {
                 "filename": path.name,
-                "path": str(path),
+                "dirpath": str(path.parent),
                 "width": src.width,
                 "height": src.height,
             }

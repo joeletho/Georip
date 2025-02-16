@@ -6,81 +6,89 @@ import rasterio
 import shapely
 from rasterio.io import DatasetWriter
 from rasterio.windows import Window
-from shapely import (
-    MultiPolygon,
-    is_empty,
-    is_valid,
-    normalize,
-    remove_repeated_points,
-    simplify,
-)
+from shapely import box, normalize, remove_repeated_points
 from shapely.geometry import Polygon
 from supervision.annotators.core import cv2
 
-from ftcnn.geometry import PolygonLike, normalize_point
+from ftcnn.geometry import PolygonLike
 from ftcnn.utils.pandas import extract_fields, normalize_fields
 
 
-def flatten_polygons(
-    gdf_src: gpd.GeoDataFrame,
-    geometry_column: str = "geometry",
-    group_by: str | list[str] | None = None,
-    preserve_fields: list[str | dict[str, str]] | None = None,
-) -> gpd.GeoDataFrame:
+def flatten_polygons(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
-    Flattens MultiPolygons into individual Polygons and calculates bounding boxes for each geometry.
-    The function handles grouping by specified columns and returns a new GeoDataFrame where each row
-    corresponds to a single Polygon (from MultiPolygon) and its associated bounding boxes.
+    Flattens MultiPolygons into individual Polygons and adds bounding boxes.
 
     Parameters:
-        gdf_src (gpd.GeoDataFrame): The source GeoDataFrame containing geometries.
-        geometry_column (str, optional): The column name containing the geometries to be flattened (default is "geometry").
-        group_by (Union[str, list[str], None], optional): Specifies columns by which to group the data
-            before applying the flattening and bounding box calculation. Defaults to None (no grouping).
+        gdf (gpd.GeoDataFrame): Input GeoDataFrame with geometries.
 
     Returns:
-        gpd.GeoDataFrame: A new GeoDataFrame where MultiPolygon geometries are flattened into individual
-            Polygons, with bounding boxes included for each geometry.
-
-    Notes:
-        - For MultiPolygon geometries, each individual polygon is extracted and treated as a separate row.
-        - The bounding boxes are calculated for each polygon and added as a new field.
+        gpd.GeoDataFrame: GeoDataFrame with flattened polygons and bounding boxes.
     """
-    geometry = []
-    rows = []
-    field_map = dict()
-    if preserve_fields:
-        field_map = normalize_fields(preserve_fields)
+    flattened_gdf = gdf.explode(index_parts=False)
+    return flattened_gdf.reset_index(drop=True)
 
-    for _, group in gdf_src.groupby(group_by, sort=False):
-        row = group.iloc[0].drop(geometry_column).to_dict()
-        polygon = shapely.unary_union(group.geometry)
 
-        if isinstance(polygon, shapely.MultiPolygon):
-            for poly in polygon.geoms:
-                poly = remove_repeated_points(normalize(poly))
-                if not poly.is_valid:
-                    continue
-                if poly.has_z:
-                    poly = Polygon([(x, y) for x, y, _ in poly.exterior.coords])
-                existing_fields = extract_fields(row, field_map)
-                for bbox in get_polygon_bboxes(poly):
-                    row["bbox"] = bbox
-                    rows.append({**row, **existing_fields})
-                    geometry.append(poly)
-        else:
-            polygon = remove_repeated_points(normalize(polygon))
-            if not polygon.is_valid:
-                continue
-            if polygon.has_z:
-                polygon = Polygon([(x, y) for x, y, _ in polygon.exterior.coords])
-            existing_fields = extract_fields(row, field_map)
-            for bbox in get_polygon_bboxes(polygon):
-                row["bbox"] = bbox
-                rows.append({**row, **existing_fields})
-                geometry.append(polygon)
-
-    return gpd.GeoDataFrame.from_dict(rows, geometry=geometry, crs=gdf_src.crs)
+# def flatten_polygons(
+#     gdf_src: gpd.GeoDataFrame,
+#     geometry_column: str = "geometry",
+#     group_by: str | list[str] | None = None,
+#     preserve_fields: list[str | dict[str, str]] | None = None,
+# ) -> gpd.GeoDataFrame:
+#     """
+#     Flattens MultiPolygons into individual Polygons and calculates bounding boxes for each geometry.
+#     The function handles grouping by specified columns and returns a new GeoDataFrame where each row
+#     corresponds to a single Polygon (from MultiPolygon) and its associated bounding boxes.
+#
+#     Parameters:
+#         gdf_src (gpd.GeoDataFrame): The source GeoDataFrame containing geometries.
+#         geometry_column (str, optional): The column name containing the geometries to be flattened (default is "geometry").
+#         group_by (Union[str, list[str], None], optional): Specifies columns by which to group the data
+#             before applying the flattening and bounding box calculation. Defaults to None (no grouping).
+#
+#     Returns:
+#         gpd.GeoDataFrame: A new GeoDataFrame where MultiPolygon geometries are flattened into individual
+#             Polygons, with bounding boxes included for each geometry.
+#
+#     Notes:
+#         - For MultiPolygon geometries, each individual polygon is extracted and treated as a separate row.
+#         - The bounding boxes are calculated for each polygon and added as a new field.
+#     """
+#     geometry = []
+#     rows = []
+#     field_map = dict()
+#     if preserve_fields:
+#         field_map = normalize_fields(preserve_fields)
+#
+#     for _, group in gdf_src.groupby(group_by, sort=False):
+#         row = group.iloc[0].drop(geometry_column).to_dict()
+#         polygon = shapely.unary_union(group.geometry)
+#
+#         if isinstance(polygon, shapely.MultiPolygon):
+#             for poly in polygon.geoms:
+#                 poly = remove_repeated_points(normalize(poly))
+#                 if not poly.is_valid:
+#                     continue
+#                 if poly.has_z:
+#                     poly = Polygon([(x, y) for x, y, _ in poly.exterior.coords])
+#                 existing_fields = extract_fields(row, field_map)
+#                 for bbox in get_polygon_bboxes(poly):
+#                     row["bbox"] = bbox
+#                     rows.append({**row, **existing_fields})
+#                     geometry.append(poly)
+#         else:
+#             polygon = remove_repeated_points(normalize(polygon))
+#             if not polygon.is_valid:
+#                 continue
+#             if polygon.has_z:
+#                 polygon = Polygon([(x, y) for x, y, _ in polygon.exterior.coords])
+#             existing_fields = extract_fields(row, field_map)
+#             for bbox in get_polygon_bboxes(polygon):
+#                 row["bbox"] = bbox
+#                 rows.append({**row, **existing_fields})
+#                 geometry.append(polygon)
+#
+#     return gpd.GeoDataFrame.from_dict(rows, geometry=geometry, crs=gdf_src.crs)
+#
 
 
 def get_polygon_points(

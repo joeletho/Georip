@@ -1756,6 +1756,7 @@ def mask_to_polygon_maskrcnn(mask):
 def predict_geotiff_maskrcnn(
     model, geotiff_path, confidence, tile_size, imgsz, **kwargs
 ):
+    geotiff_path = Path(geotiff_path)
     tiles, epsg_code = tile_raster_and_convert_to_png(geotiff_path, tile_size=tile_size)
     results = []
 
@@ -1775,7 +1776,8 @@ def predict_geotiff_maskrcnn(
     pbar.close()
 
     columns = [
-        "path",
+        "dirpath",
+        "filename",
         "class_id",
         "class_name",
         "bbox_x",
@@ -1823,7 +1825,8 @@ def predict_geotiff_maskrcnn(
                             )
                             rows.append(
                                 {
-                                    "path": geotiff_path,
+                                    "filename": geotiff_path.name,
+                                    "dirpath": str(geotiff_path.parent),
                                     "class_id": int(class_id),
                                     "class_name": class_name,
                                     "bbox_x": bbox_x,

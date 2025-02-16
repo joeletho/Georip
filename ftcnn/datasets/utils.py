@@ -1,10 +1,10 @@
-import os
+import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 import geopandas as gpd
-import pandas as pd
-from rasterio import rasterio
+from geopandas.geoseries import shapely
 
 from ftcnn.geometry.polygons import is_sparse_polygon
 from ftcnn.geospacial import DataFrameLike
@@ -58,8 +58,11 @@ def init_dataset_filepaths(
     }
 
 
-def cleanup_unused_tiles(
-    gdf: gpd.GeoDataFrame, geom_col: str, img_path_col: str
+def remove_unused_tiles(
+    gdf: gpd.GeoDataFrame,
+    geom_column: str,
+    image_directory_column: str,
+    image_filename_column: str,
 ) -> gpd.GeoDataFrame:
     """
     Removes invalid geometries and associated files, and cleans up empty directories.
@@ -67,69 +70,46 @@ def cleanup_unused_tiles(
     Parameters:
         gdf (GeoDataFrame): The GeoDataFrame containing geometry and image paths.
         geom_col (str): The column name in `gdf` that contains geometries.
-        img_path_col (str): The column name in `gdf` that contains image paths.
+        image_directory_column (str): The column name containing the directory paths to images.
+        image_filename_column (str): The column name containing the image filenames.
 
     Returns:
         GeoDataFrame: The updated GeoDataFrame with valid geometries and cleaned-up paths.
     """
-    image_paths = gdf[img_path_col].unique().tolist()
-    gdf = gdf.explode(ignore_index=True)
+    gdf = gdf.explode(column=geom_column, ignore_index=True)
 
-    for path in image_paths:
-        # Filter geometries associated with the current image path
-        path_mask = gdf[img_path_col] == path
-        geometries = gdf.loc[path_mask, geom_col]
+    unique_paths = gdf[
+        [image_directory_column, image_filename_column]
+    ].drop_duplicates()
 
-        # Remove invalid geometries
+    for _, row in unique_paths.iterrows():
+        directory = row[image_directory_column]
+        filename = row[image_filename_column]
+        full_path = Path(directory) / filename
+
+        path_mask = (gdf[image_directory_column] == directory) & (
+            gdf[image_filename_column] == filename
+        )
+        geometries = gdf.loc[path_mask, geom_column]
+
         sparse_mask = geometries.apply(is_sparse_polygon)
         gdf = gdf.drop(gdf.loc[path_mask & sparse_mask].index).reset_index(drop=True)
 
-        # Check if the path still has valid references
-        if gdf.loc[gdf[img_path_col] == path].empty:
-            filepath = Path(path)
-            if filepath.exists():
-                os.remove(filepath)
-                parent = filepath.parent
-                if parent.exists() and len(os.listdir(parent)) == 0:
-                    os.rmdir(parent)
+        if gdf.loc[path_mask].empty:
+            if full_path.exists():
+                try:
+                    full_path.unlink()
+                except OSError as e:
+                    print(f"Error removing file {full_path}: {e}")
+
+                parent_dir = full_path.parent
+                if parent_dir.exists() and not any(parent_dir.iterdir()):
+                    try:
+                        parent_dir.rmdir()
+                    except OSError as e:
+                        print(f"Error removing directory {parent_dir}: {e}")
+
     return gdf
-
-
-# def cleanup_unused_tiles(
-#     gdf: gpd.GeoDataFrame, geom_col: str, img_path_col: str
-# ) -> gpd.GeoDataFrame:
-#     """
-#     Removes unused tiles (files and empty directories) based on a GeoDataFrame.
-#
-#     Parameters:
-#         gdf (GeoDataFrame): The GeoDataFrame containing geometry and image paths.
-#         geom_col (str): The column name in `gdf` that contains geometries.
-#         img_path_col (str): The column name in `gdf` that contains image paths.
-#
-#     Returns:
-#         GeoDataFrame: The updated GeoDataFrame with non-empty geometries.
-#     """
-#     unused_tiles = []
-#
-#     # Remove any tiles that do not map to an image in the dataframe
-#     sparse_mask = gdf[geom_col].apply(is_sparse_polygon)
-#     unused_tiles = gdf.loc[sparse_mask, img_path_col].unique().tolist()
-#     gdf = gpd.GeoDataFrame(gdf[~sparse_mask].reset_index(drop=True))
-#
-#     for path in unused_tiles:
-#         path = Path(path)
-#         parent = path.parent
-#         if path.exists():
-#             os.remove(path)
-#             if (gdf[img_path_col] == path).any():
-#                 gdf = gdf.drop(
-#                     gdf.loc[gdf[img_path_col] == path].index.tolist()
-#                 ).reset_index(drop=True)
-#         if parent.exists() and len(os.listdir(parent)) == 0:
-#             os.rmdir(parent)
-#
-#     return gdf
-#
 
 
 def preprocess_geo_background_source(
@@ -196,7 +176,6 @@ def preprocess_geo_source(
                 raise ValueError(f"Failed to load shapefile: {e}")
         else:
             raise ValueError("Source path must point to a shapefile (.shp).")
-
     elif isinstance(source, DataFrameLike):
         timestamp = f"{time.time()}"
         timestamp = timestamp[: timestamp.find(".")]
@@ -213,3 +192,83 @@ def postprocess_geo_source(
 ) -> None:
     if source.stem.startswith(TMP_FILE_PREFIX):
         source.unlink()
+
+
+def _encode_classes(
+    row: gpd.GeoSeries, geom_col: str, class_col: str, class_names: str | list
+):
+    """
+    Encodes class labels based on the given class column and geometry validity.
+
+    Parameters:
+        row (GeoSeries): A single row of a GeoDataFrame containing geometry and class information.
+        geom_col (str): The column name containing geometries.
+        class_col (str): The column name containing class labels.
+        class_names (str | list): A string or list of class names to match against.
+
+    Returns:
+        tuple[int, str]: A tuple containing the class ID and class name.
+
+    Explanation:
+        - If `class_names` is a string, it is converted to a list for consistency.
+        - The function initializes the default classification as "Background" with an ID of -1.
+        - If the geometry is missing, empty, or invalid, the function logs the issue and classifies the row as "Background."
+        - Otherwise, it retrieves the class name from the specified column and assigns an ID based on its index in `class_names`.
+    """
+    if not isinstance(class_names, list):
+        class_names = [class_names]
+    class_name = "Background"
+    class_id = -1
+
+    geom = row.get(geom_col)
+    if geom is None or geom.is_empty or not geom.is_valid:
+        if geom is not None:
+            print(
+                "encode_classes: geom is invalid:",
+                shapely.is_valid_reason(geom),
+                file=sys.stderr,
+            )
+        else:
+            print("encode_classes: Geometry is None", file=sys.stderr)
+        print(
+            "Row does not meet minimum criteria -- Classifying row as 'Background':",
+            row,
+            file=sys.stderr,
+        )
+    else:
+        class_name = str(row.get(class_col))
+        for i, name in enumerate(class_names):
+            if class_name == name:
+                class_id = i
+    return (class_id, class_name)
+
+
+def encode_classes(
+    df: DataFrameLike, encoder: Callable | None = None, **encoder_kwargs
+) -> DataFrameLike:
+    """
+    Adds encoded class information to a DataFrame.
+
+    Parameters:
+        df (DataFrameLike): The input DataFrame containing data to be encoded.
+        encoder (Callable or None): A function that encodes a row into class ID and class name.
+                            Defaults to `encode_default_classes`.
+        encoder_kwargs (dict): Additional keyword arguments for default encoder function. Ignored if `encoder` is not None.
+
+    Returns:
+        DataFrameLike: A copy of the DataFrame with added "class_id" and "class_name" columns.
+    """
+    columns = {"class_id": [], "class_name": []}
+    caller = (
+        encoder
+        if encoder is not None
+        else lambda r: _encode_classes(r, **encoder_kwargs)
+    )
+    for _, row in df.iterrows():
+        id, name = caller(row)
+        columns["class_id"].append(id)
+        columns["class_name"].append(name)
+    df_encoded = df.copy()
+    df_encoded.insert(0, "class_id", columns["class_id"])
+    df_encoded.insert(1, "class_name", columns["class_name"])
+    return df_encoded

@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -107,6 +108,7 @@ def predict_geotiff(model, geotiff_path, confidence, tile_size, imgsz, **kwargs)
         Tuple[List[Results], GeoDataFrame]:
             Detection results and processed GeoDataFrame with geometries.
     """
+    geotiff_path = Path(geotiff_path)
     tiles, epsg_code = tile_raster_and_convert_to_png(geotiff_path, tile_size=tile_size)
     results = []
 
@@ -125,7 +127,8 @@ def predict_geotiff(model, geotiff_path, confidence, tile_size, imgsz, **kwargs)
         "subregion",
         "start_year",
         "end_year",
-        "path",
+        "filename",
+        "dirpath",
         "class_id",
         "class_name",
         "bbox_x",
@@ -170,7 +173,8 @@ def predict_geotiff(model, geotiff_path, confidence, tile_size, imgsz, **kwargs)
                                 "subregion": subregion,
                                 "start_year": years[0],
                                 "end_year": years[1],
-                                "path": geotiff_path,
+                                "filename": geotiff_path.name,
+                                "dirpath": str(geotiff_path.parent),
                                 "class_id": int(class_id),
                                 "class_name": class_name,
                                 "bbox_x": bbox_x,

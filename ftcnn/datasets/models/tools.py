@@ -1,4 +1,5 @@
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -7,31 +8,31 @@ import pandas as pd
 from tqdm.auto import trange
 
 from ftcnn.datasets.tools import make_ndvi_difference_dataset
-from ftcnn.datasets.utils import (
-    TMP_FILE_PREFIX,
-    postprocess_geo_source,
-    preprocess_geo_source,
-)
-from ftcnn.geospacial.utils import encode_classes, gdf_ndvi_validate_years_as_ints
+from ftcnn.datasets.utils import (TMP_FILE_PREFIX, encode_classes,
+                                  postprocess_geo_source,
+                                  preprocess_geo_source)
+from ftcnn.geospacial.utils import gdf_ndvi_validate_years_as_ints
 from ftcnn.io import save_as_csv, save_as_gpkg, save_as_shp
 from ftcnn.utils import _WRITE_LOCK, FTCNN_TMP_DIR
 
 
 def build_ndvi_difference_dataset(config: dict[str, Any]):
-    source = config["source"]
-    source_images_dir = config["source_images_dir"]
-    root_dir = config["root_dir"]
+    shapefile = config["shapefile"]
+    image_dir = config["image_dir_src"]
+    output_dir = config["output_dir"]
     region_column = config["region_column"]
     year_start_column = config["year_start_column"]
     year_end_column = config["year_end_column"]
     geometry_column = config["geometry_column"]
     years = config["years"]
-    background = config["background"]
     background_ratio = config["background_ratio"]
+    background_filter = config["background_filter"]
+    background_seed = config["background_seed"]
     tile_size = config["tile_size"]
+    stride = config["stride"]
     translate_xy = config["translate_xy"]
     class_encoder = config["class_encoder"]
-    background_filter = config["background_filter"]
+
     exist_ok = config["exist_ok"]
     clear_output_dir = config["clear_output_dir"]
     save_shp = config["save_shp"]
@@ -42,6 +43,9 @@ def build_ndvi_difference_dataset(config: dict[str, Any]):
     num_workers = config["num_workers"]
     preserve_fields = config["preserve_fields"]
 
+    if background_filter is not None and background_ratio <= 0:
+        raise ValueError("Background ratio must be greater than 0")
+
     total_updates = 3
     pbar = trange(
         total_updates,
@@ -51,20 +55,20 @@ def build_ndvi_difference_dataset(config: dict[str, Any]):
     timestamp = f"{time.time()}"
     timestamp = timestamp[: timestamp.find(".")]
 
-    source_path = source
-    if isinstance(source, pd.DataFrame) or isinstance(source, gpd.GeoDataFrame):
+    source_path = shapefile
+    if isinstance(shapefile, pd.DataFrame) or isinstance(shapefile, gpd.GeoDataFrame):
         gdf_ndvi_validate_years_as_ints(
-            source,
+            shapefile,
             start_year_column=year_start_column,
             end_year_column=year_end_column,
         )
 
-        if isinstance(source, pd.DataFrame):
-            source = gpd.GeoDataFrame(source)
+        if isinstance(shapefile, pd.DataFrame):
+            shapefile = gpd.GeoDataFrame(shapefile)
         source_path = (
             FTCNN_TMP_DIR / f"{TMP_FILE_PREFIX}ndvi_difference_dataset_{timestamp}.shp"
         )
-        save_as_shp(source, source_path)
+        save_as_shp(shapefile, source_path)
 
     source_path = preprocess_geo_source(source_path, geometry_column)
 
@@ -74,47 +78,78 @@ def build_ndvi_difference_dataset(config: dict[str, Any]):
     if preserve_fields is None:
         preserve_fields = [*region_column]
     else:
+        if not isinstance(preserve_fields, list):
+            preserve_fields = [preserve_fields]
         preserve_fields.extend(region_column)
 
-    ds_name, gdf = make_ndvi_difference_dataset(
-        source_path,
-        source_images_dir,
-        root_dir,
-        years=years,
-        region_col=region_column,
-        start_year_col=year_start_column,
-        end_year_col=year_end_column,
-        geom_col=geometry_column,
-        tile_size=tile_size,
-        clean_dest=clear_output_dir,
-        translate_xy=translate_xy,
-        exist_ok=exist_ok,
-        save_csv=save_csv,
-        save_shp=save_shp,
-        save_gpkg=save_gpkg,
-        convert_to_png=convert_to_png,
-        pbar_leave=pbar_leave,
-        num_workers=num_workers,
-        preserve_fields=preserve_fields,
-    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            make_ndvi_difference_dataset,
+            source_path,
+            image_dir,
+            output_dir,
+            years=years,
+            region_col=region_column,
+            start_year_col=year_start_column,
+            end_year_col=year_end_column,
+            geom_col=geometry_column,
+            tile_size=tile_size,
+            stride=stride,
+            clean_dest=clear_output_dir,
+            translate_xy=translate_xy,
+            exist_ok=exist_ok,
+            save_csv=save_csv,
+            save_shp=save_shp,
+            save_gpkg=save_gpkg,
+            convert_to_png=convert_to_png,
+            pbar_leave=pbar_leave,
+            num_workers=num_workers,
+            preserve_fields=preserve_fields,
+        )
+
+        while True:
+            if future.done():
+                ds_name, gdf = future.result()
+                break
+            time.sleep(1)
+            pbar.refresh()
 
     postprocess_geo_source(source_path)
 
     pbar.update()
 
-    gdf = encode_classes(gdf, class_encoder)
+    if class_encoder is None:
+        encoder_params = {
+            "geom_col": geometry_column,
+            "class_col": config["class_column"],
+            "class_names": config["class_names"],
+        }
+        gdf = encode_classes(gdf, None, **encoder_params)
+    else:
+        gdf = encode_classes(gdf, class_encoder)
 
-    if background:
-        if not callable(background_filter):
+    if isinstance(background_filter, bool) or background_filter is not None:
+        if background_filter is True:
+
+            def _filter_background(row):
+                return row["class_name"] not in config["class_names"]
+
+            background_filter = _filter_background
+        elif not callable(background_filter):
             raise ValueError(
-                "`background_filter` must be a callable function when `background` is True."
+                f"`background_filter` must be callable, not {type(background_filter)}"
             )
 
-        background_gdf = gdf.iloc[gdf.apply(background_filter, axis=1)]
+        background_gdf = gdf.loc[gdf.apply(background_filter, axis=1)]
+        if background_gdf.empty:
+            raise ValueError("No background found after filtering")
+
         truth_gdf = gdf.drop(index=background_gdf.index)
 
         sample_size = int(len(truth_gdf) * background_ratio)
-        background_gdf = background_gdf.sample(n=sample_size)
+        background_gdf = background_gdf.sample(
+            n=sample_size, random_state=background_seed, ignore_index=True
+        )
 
         lock_id = _WRITE_LOCK.acquire()
         print(

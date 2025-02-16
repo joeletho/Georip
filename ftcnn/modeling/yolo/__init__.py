@@ -1,7 +1,6 @@
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from glob import glob
-from os import PathLike
 from pathlib import Path
 from time import time
 
@@ -16,6 +15,7 @@ from torchvision.io import read_image
 from torchvision.transforms.v2 import functional as F
 from tqdm.auto import trange
 
+import ftcnn.modeling.yolo.predict
 from ftcnn.geometry import normalize_point
 from ftcnn.io import clear_directory
 from ftcnn.modeling import maskrcnn
@@ -27,7 +27,9 @@ from ftcnn.modeling.utils import (AnnotatedLabel, BBox, DatasetSplitMode,
                                   display_image_and_annotations, make_dataset,
                                   maskrcnn_get_transform,
                                   parse_labels_from_csv)
-from ftcnn.utils import NUM_CPU, TQDM_INTERVAL, Lock
+from ftcnn.utils import NUM_CPU, TQDM_INTERVAL, Lock, StrPathLike
+
+__all__ = ["predict"]
 
 
 class YOLODatasetBase(Serializable):
@@ -36,6 +38,7 @@ class YOLODatasetBase(Serializable):
     class_map: dict[str, int]
     class_distribution: dict[str, int]
     root_path: Path = Path()
+    is_compiled = False
 
     def __init__(
         self,
@@ -63,19 +66,21 @@ class YOLODatasetBase(Serializable):
             self.class_distribution, default=lambda o: o.__dict__, indent=2
         )
 
+    def get_num_images_and_labels(self, dataset_type: str):
+
+        return (
+            self.data_frame.loc[self.data_frame["type"] == dataset_type, "filename"]
+            .unique()
+            .shape[0]
+        ), self.data_frame.loc[self.data_frame["type"] == dataset_type].shape[0]
+
     def info(self):
-        ntrain_images = (
-            self.data_frame.loc[self.data_frame["type"] == "train", "filename"]
-            .unique()
-            .shape[0]
-        )
-        ntrain_labels = self.data_frame.loc[self.data_frame["type"] == "train"].shape[0]
-        nval_images = (
-            self.data_frame.loc[self.data_frame["type"] == "val", "filename"]
-            .unique()
-            .shape[0]
-        )
-        nval_labels = self.data_frame.loc[self.data_frame["type"] == "val"].shape[0]
+        if not self.is_compiled:
+            raise RuntimeError("Must compile dataset before calling method")
+
+        num_train_images, num_train_labels = self.get_num_images_and_labels("train")
+        num_val_images, num_val_labels = self.get_num_images_and_labels("val")
+        num_test_images, num_test_labels = self.get_num_images_and_labels("test")
 
         lock_id = self._lock.acquire()
         print(
@@ -83,24 +88,33 @@ class YOLODatasetBase(Serializable):
             + f"Number of labels: {len(self.labels)}\n"
             + f"Number of images: {len(self.images)}\n"
             + f"Number of classes: {self.get_num_classes()}\n"
-            + f"Training data: {ntrain_images} images, {ntrain_labels} labels\n"
-            + f"Validation data: {nval_images} images, {nval_labels} labels\n"
+            + f"Training data: {num_train_images} images, {num_train_labels} labels\n"
+            + f"Validation data: {num_val_images} images, {num_val_labels} labels\n"
+            + f"Test data: {num_test_images} images, {num_test_labels} labels\n"
         )
         self._lock.free(lock_id)
 
     def summary(self):
-        ntrain_images = (
-            self.data_frame.loc[self.data_frame["type"] == "train", "filename"]
-            .unique()
-            .shape[0]
-        )
-        ntrain_labels = self.data_frame.loc[self.data_frame["type"] == "train"].shape[0]
-        nval_images = (
-            self.data_frame.loc[self.data_frame["type"] == "val", "filename"]
-            .unique()
-            .shape[0]
-        )
-        nval_labels = self.data_frame.loc[self.data_frame["type"] == "val"].shape[0]
+        if not self.is_compiled:
+            raise RuntimeError("Must compile dataset before calling method")
+
+        def get_formatted_class_distribution_by_type(dataset_type: str) -> str:
+            subset = self.data_frame.loc[self.data_frame["type"] == dataset_type]
+            distribution = (
+                subset[["class_id", "class_name"]].value_counts().sort_index().to_dict()
+            )
+            return "\n".join(
+                f"    Class {class_id}, {class_name}: {count}"
+                for (class_id, class_name), count in distribution.items()
+            )
+
+        train_distribution = get_formatted_class_distribution_by_type("train")
+        val_distribution = get_formatted_class_distribution_by_type("val")
+        test_distribution = get_formatted_class_distribution_by_type("test")
+
+        num_train_images, num_train_labels = self.get_num_images_and_labels("train")
+        num_val_images, num_val_labels = self.get_num_images_and_labels("val")
+        num_test_images, num_test_labels = self.get_num_images_and_labels("test")
 
         lock_id = self._lock.acquire()
         print(
@@ -108,10 +122,18 @@ class YOLODatasetBase(Serializable):
             + f"Number of labels: {len(self.labels)}\n"
             + f"Number of images: {len(self.images)}\n"
             + f"Number of classes: {self.get_num_classes()}\n"
-            + f"Training data: {ntrain_images} images, {ntrain_labels} labels\n"
-            + f"Validation data: {nval_images} images, {nval_labels} labels\n"
             + "Class distribution:\n"
             + self.get_class_distribution()
+            + "\n"
+            + f"Training data: {num_train_images} images, {num_train_labels} labels\n"
+            + train_distribution
+            + "\n"
+            + f"Validation data: {num_val_images} images, {num_val_labels} labels\n"
+            + val_distribution
+            + "\n"
+            + f"Test data: {num_test_images} images, {num_test_labels} labels\n"
+            + test_distribution
+            + "\n"
             + "\n\n"
             + f"Data:\n{self.data_frame}\n"
         )
@@ -197,6 +219,9 @@ class YOLODatasetBase(Serializable):
         _______
         Self
         """
+        if self.is_compiled:
+            return
+
         data = {
             "type": [],
             "class_id": [],
@@ -208,7 +233,7 @@ class YOLODatasetBase(Serializable):
             "filename": [],
             "width": [],
             "height": [],
-            "path": [],
+            "dirpath": [],
             "segments": [],
         }
         self.labels = list(set(self.labels))
@@ -221,7 +246,9 @@ class YOLODatasetBase(Serializable):
         if not len(self.class_map.keys()):
             raise ValueError("Dataset does not contain classes")
 
-        self.class_distribution = {name: 0 for name in self.class_map.keys()}
+        self.class_distribution = {
+            name: 0 for name in sorted(self.class_map, key=lambda x: self.class_map[x])
+        }
 
         indices_to_remove = []
 
@@ -295,7 +322,7 @@ class YOLODatasetBase(Serializable):
                 data["filename"].append(image_data.filename)
                 data["width"].append(image_data.shape[0])
                 data["height"].append(image_data.shape[1])
-                data["path"].append(image_data.filepath)
+                data["dirpath"].append(Path(image_data.filepath).parent)
                 data["bbox_x"].append(label.bbox.x if label.bbox.x != -1 else "")
                 data["bbox_y"].append(label.bbox.y if label.bbox.y != -1 else "")
                 data["bbox_w"].append(
@@ -338,7 +365,9 @@ class YOLODatasetBase(Serializable):
                         raise msg
 
         self.data_frame = pd.DataFrame.from_dict(data)
-        self.data_frame = self.data_frame.drop_duplicates()
+        self.data_frame = self.data_frame.drop_duplicates().sort_values(
+            by=["type"], ignore_index=True
+        )
 
         if len(indices_to_remove) > 0:
             lock_id = self._lock.acquire()
@@ -351,9 +380,10 @@ class YOLODatasetBase(Serializable):
                 print(f"  Removed: {label}")
             self._lock.free(lock_id)
 
+        self.is_compiled = True
         return self
 
-    def to_csv(self, output_path: PathLike, **kwargs):
+    def to_csv(self, output_path: StrPathLike, **kwargs):
         """Saves the dataset to a CSV file
 
         Parameters
@@ -366,7 +396,7 @@ class YOLODatasetBase(Serializable):
         self.data_frame.to_csv(output_path, index=False, **kwargs)
 
     @staticmethod
-    def from_csv(path: PathLike, **kwargs):
+    def from_csv(path: StrPathLike, **kwargs):
         """Constructs and returns a YOLODataset from a CSV file.
 
         The dataset is required to have the following columns in any order:
@@ -387,8 +417,8 @@ class YOLODatasetBase(Serializable):
                a list of points constructng a polygon
            filename: str
                the filename of the image, including file extension
-           path: str
-               the path of the image, including filename
+           directory: str
+               the path of the directory containing the image
            width: float|int
                the width of the image
            height: float|int
@@ -408,15 +438,24 @@ class YOLODatasetBase(Serializable):
         num_workers = kwargs.pop("num_workers", NUM_CPU)
 
         df = pd.read_csv(path)
-        image_map = {row["filename"]: str(row["path"]) for _, row in df.iterrows()}
+        image_map = {
+            row["filename"]: str(Path(row["dirpath"]) / row["filename"])
+            for _, row in df.iterrows()
+        }
         image_names = set()
         images = []
 
+        pbar = trange(1, desc="Parsing labels from CSV", leave=False)
         labels = parse_labels_from_csv(path, **kwargs)
-        total_updates = len(labels)
+
+        total_updates = len(labels) + 1
         updates = 0
         start = time()
-        pbar = trange(total_updates, desc="Collecting images", leave=False)
+        pbar.reset(total_updates)
+        pbar.update()
+
+        pbar.set_description("Collecting images")
+        pbar.refresh()
 
         for label in labels:
             image_name = label.image_filename
@@ -438,7 +477,7 @@ class YOLODatasetBase(Serializable):
 
     def generate_label_files(
         self,
-        dest_path: PathLike,
+        dest_path: StrPathLike,
         *,
         clear_dir: bool = False,
         overwrite_existing: bool = False,
@@ -466,6 +505,8 @@ class YOLODatasetBase(Serializable):
             6 0.129024 0.3007129669189453 0.0400497777777776 0.045555555555555564
             2 0.08174603174603165 0.22560507936507962 0.13915343915343897 0.1798772486772488
         """
+        if not self.is_compiled:
+            raise RuntimeError("Must compile dataset before calling method")
 
         dest_path = Path(dest_path).resolve()
         if not dest_path.exists():
@@ -508,7 +549,7 @@ class YOLODatasetBase(Serializable):
                         is_background = True
                     else:
                         points = str(row["segments"]).split()
-                        if 1 < len(points) < 3 * 2:
+                        if 1 < len(points) < 6:
                             raise ValueError(
                                 "Segments must contain 3 or more point pairs (x, y)"
                             )
@@ -523,7 +564,7 @@ class YOLODatasetBase(Serializable):
                             is_background = True
                             break
 
-            if _type in ["train", "val"]:
+            if _type in ["train", "val", "test"]:
                 _dest_path = self.root_path / "labels" / _type
             label_path = str(_dest_path / f"{filename.stem}.txt")
 
@@ -559,12 +600,13 @@ class YOLODatasetBase(Serializable):
 
     def generate_yaml_file(
         self,
-        root_abs_path: PathLike,
-        dest_abs_path: PathLike | None = None,
+        root_abs_path: StrPathLike,
+        dest_abs_path: StrPathLike | None = None,
         *,
         filename: str = "data.yaml",
-        train_path: PathLike | str = "images/train",
-        val_path: PathLike | str = "images/val",
+        train_path: StrPathLike | str = "images/train",
+        val_path: StrPathLike | str = "images/val",
+        test_path: StrPathLike | str = "images/test",
     ):
         """Generates and saves the YAML data file used by YOLO
 
@@ -598,6 +640,7 @@ class YOLODatasetBase(Serializable):
             f.write(f"path: {str(root_abs_path)}\n")
             f.write(f"train: {train_path}\n")
             f.write(f"val: {val_path}\n")
+            f.write(f"test: {test_path}\n")
             f.write("names:\n")
             for name, id in self.class_map.items():
                 if name.lower() != "background":
@@ -607,132 +650,100 @@ class YOLODatasetBase(Serializable):
 
     def split_data(
         self,
-        images_dir: PathLike,
-        labels_dir: PathLike,
+        images_dir: StrPathLike,
+        labels_dir: StrPathLike,
         *,
-        split: float = 0.7,
+        train_split: float = 0.7,
+        test_split: float = 0.15,
         shuffle: bool = True,
+        shuffle_seed: int | None = None,
+        stratify: bool = True,
         recurse: bool = True,
-        save: bool = True,
         mode: DatasetSplitMode | str = DatasetSplitMode.All,
-        background_bias: None | float = None,
+        save: bool = False,
+        clear_dest: bool = False,
         **kwargs,
     ) -> tuple[
-        tuple[list[ImageData], list[AnnotatedLabel]],
-        tuple[list[ImageData], list[AnnotatedLabel]],
+        tuple[list[ImageData], list[AnnotatedLabel]],  # Train
+        tuple[list[ImageData], list[AnnotatedLabel]],  # Validation
+        tuple[list[ImageData], list[AnnotatedLabel]],  # Test
     ]:
-
-        train_ds, val_ds = make_dataset(
+        image_class_data = {
+            str(row["filename"]): int(row["class_id"])
+            for _, row in self.data_frame.iterrows()
+        }
+        train_ds, val_ds, test_ds = make_dataset(
             images_dir,
             labels_dir,
             mode=mode,
-            split=split,
+            train_split=train_split,
+            test_split=test_split,
+            stratify_split=stratify,
+            class_data=image_class_data,
             shuffle=shuffle,
+            shuffle_seed=shuffle_seed,
             recurse=recurse,
             **kwargs,
         )
-        if split > 0.5 and len(train_ds[0]) < len(val_ds[0]):
-            train_ds, val_ds = val_ds, train_ds
+        if train_split > 0.5:
+            if len(train_ds[0]) < len(val_ds[0]):
+                train_ds, val_ds = val_ds, train_ds
+            if len(train_ds[0]) < len(test_ds[0]):
+                train_ds, test_ds = test_ds, train_ds
 
-        for train_image in train_ds[0]:
-            name = str(train_image.filename)
-            self.data_frame.loc[self.data_frame["filename"] == name, "type"] = "train"
-            class_name = self.data_frame.loc[
-                self.data_frame["filename"] == name, "class_name"
-            ].iloc[0]
-            class_id = self.data_frame.loc[
-                self.data_frame["filename"] == name, "class_id"
-            ].iloc[0]
-            for label in train_ds[1]:
-                if label.image_filename == name:
-                    label.class_name = class_name
-                    label.class_id = class_id
+        def assign_data_class_info(
+            ds: tuple[list[ImageData], list[AnnotatedLabel]], dataset_type: str
+        ):
+            for image in ds[0]:
+                name = str(image.filename)
+                self.data_frame.loc[self.data_frame["filename"] == name, "type"] = (
+                    dataset_type
+                )
 
-        for val_image in val_ds[0]:
-            name = str(val_image.filename)
-            self.data_frame.loc[self.data_frame["filename"] == name, "type"] = "val"
-            class_name = self.data_frame.loc[
-                self.data_frame["filename"] == name, "class_name"
-            ].iloc[0]
-            class_id = self.data_frame.loc[
-                self.data_frame["filename"] == name, "class_id"
-            ].iloc[0]
-            for label in val_ds[1]:
-                if label.image_filename == name:
-                    label.class_name = class_name
-                    label.class_id = class_id
+        assign_data_class_info(train_ds, "train")
+        assign_data_class_info(val_ds, "val")
+        assign_data_class_info(test_ds, "test")
 
-        if background_bias is not None:
-            ntrain_class = self.data_frame.loc[
-                (self.data_frame["type"] == "train")
-                & (self.data_frame["class_id"] != -1)
-            ].shape[0]
-            ntrain_bkgd = self.data_frame.loc[
-                (self.data_frame["type"] == "train")
-                & (self.data_frame["class_id"] == -1)
-            ].shape[0]
-            nbkgd_rm = (
-                ntrain_bkgd - ntrain_class
-                if ntrain_bkgd / ntrain_class > background_bias
-                else 0
+        def copy_dataset(
+            ds: tuple[list[ImageData], list[AnnotatedLabel]],
+            dataset_type: str,
+            clear_dest: bool = False,
+        ):
+            images_dest = self.root_path / "images" / dataset_type
+            labels_dest = self.root_path / "labels" / dataset_type
+            if clear_dest:
+                clear_directory(images_dest)
+                clear_directory(labels_dest)
+
+            copy_images_and_labels(
+                image_paths=[image.filepath for image in ds[0]],
+                label_paths=[label.filepath for label in ds[1]],
+                images_dest=images_dest,
+                labels_dest=labels_dest,
             )
-
-            if nbkgd_rm > 0:
-                background_rows = self.data_frame[
-                    (self.data_frame["type"] == "train")
-                    & (self.data_frame["class_id"] == -1)
-                ]
-                rows_to_drop = background_rows.sample(n=nbkgd_rm).index
-                self.data_frame = self.data_frame.drop(rows_to_drop)
-
-            nval_class = self.data_frame.loc[
-                (self.data_frame["type"] == "val") & (self.data_frame["class_id"] != -1)
-            ].shape[0]
-            nval_bkgd = self.data_frame.loc[
-                (self.data_frame["type"] == "val") & (self.data_frame["class_id"] == -1)
-            ].shape[0]
-            nbkgd_rm = (
-                nval_bkgd - nval_class
-                if nval_bkgd / nval_class > background_bias
-                else 0
-            )
-
-            if nbkgd_rm > 0:
-                background_rows = self.data_frame[
-                    (self.data_frame["type"] == "val")
-                    & (self.data_frame["class_id"] == -1)
-                ]
-                rows_to_drop = background_rows.sample(n=nbkgd_rm).index
-                self.data_frame = self.data_frame.drop(rows_to_drop)
 
         if save:
-            copy_images_and_labels(
-                image_paths=[image.filepath for image in train_ds[0]],
-                label_paths=[label.filepath for label in train_ds[1]],
-                images_dest=self.root_path / "images" / "train",
-                labels_dest=self.root_path / "labels" / "train",
-            )
-            copy_images_and_labels(
-                image_paths=[image.filepath for image in val_ds[0]],
-                label_paths=[label.filepath for label in val_ds[1]],
-                images_dest=self.root_path / "images" / "val",
-                labels_dest=self.root_path / "labels" / "val",
-            )
+            copy_dataset(train_ds, "train", clear_dest=clear_dest)
+            copy_dataset(val_ds, "val", clear_dest=clear_dest)
+            copy_dataset(test_ds, "test", clear_dest=clear_dest)
 
-        self.data_frame = pd.DataFrame(
-            pd.concat(
-                [
-                    self.data_frame.loc[self.data_frame["type"] == "train"],
-                    self.data_frame.loc[self.data_frame["type"] == "val"],
-                ],
-                ignore_index=True,
+            self.data_frame = pd.DataFrame(
+                pd.concat(
+                    [
+                        self.data_frame.loc[self.data_frame["type"] == "train"],
+                        self.data_frame.loc[self.data_frame["type"] == "val"],
+                        self.data_frame.loc[self.data_frame["type"] == "test"],
+                    ],
+                    ignore_index=True,
+                )
             )
-        )
-        self.data_frame = self.data_frame.sort_values(by="type", ignore_index=True)
-        self.images = train_ds[0] + val_ds[0]
-        self.labels = train_ds[1] + val_ds[1]
+            self.data_frame = self.data_frame.sort_values(
+                by=["type", "class_id"], ignore_index=True
+            )
+            self.images = train_ds[0] + val_ds[0] + test_ds[0]
+            self.labels = train_ds[1] + val_ds[1] + test_ds[1]
 
-        return train_ds, val_ds
+        return train_ds, val_ds, test_ds
 
 
 class YOLODatasetLoader(torch.utils.data.Dataset):

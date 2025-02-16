@@ -1,43 +1,36 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from functools import partial
+from multiprocessing import Manager
+from multiprocessing.queues import Empty
 from pathlib import Path
-from time import time
+from time import sleep
 from typing import Callable
 
 import geopandas as gpd
 import pandas as pd
 from tqdm.auto import trange
 
-from ftcnn.datasets.utils import (
-    TMP_FILE_PREFIX,
-    StrPathLike,
-    cleanup_unused_tiles,
-    init_dataset_filepaths,
-)
+from ftcnn.datasets.utils import (TMP_FILE_PREFIX, StrPathLike,
+                                  init_dataset_filepaths, remove_unused_tiles)
 from ftcnn.geospacial.mapping import map_geometries_by_year_span
 from ftcnn.geospacial.processing import preprocess_ndvi_shapefile
-from ftcnn.geospacial.utils import (
-    gdf_intersects_region_year_geometry,
-    translate_xy_coords_to_index,
-)
-from ftcnn.io import (
-    clear_directory,
-    collect_files_with_suffix,
-    pathify,
-    save_as_csv,
-    save_as_gpkg,
-    save_as_shp,
-)
-from ftcnn.raster.tools import create_raster_tiles, process_raster_to_png_conversion
-from ftcnn.utils import NUM_CPU, TQDM_INTERVAL
+from ftcnn.geospacial.utils import (gdf_intersects_region_year_geometry,
+                                    translate_xy_coords_to_index)
+from ftcnn.io import (clear_directory, collect_files_with_suffix, save_as_csv,
+                      save_as_gpkg, save_as_shp)
+from ftcnn.raster.tools import (create_raster_tiles,
+                                process_raster_to_png_conversion)
+from ftcnn.utils import NUM_CPU
 
 
 def preprocess_ndvi_difference_dataset(
     gdf: gpd.GeoDataFrame,
     output_dir: StrPathLike,
     years: tuple[int, int] | None = None,
-    img_path_col: str = "path",
-    start_year_col: str = "start_year",
-    end_year_col: str = "end_year",
+    image_directory_column: str = "dirpath",
+    image_filename_column: str = "filename",
+    start_year_column: str = "start_year",
+    end_year_column: str = "end_year",
     clean_dest: bool = False,
 ) -> list[Path]:
     """
@@ -58,34 +51,27 @@ def preprocess_ndvi_difference_dataset(
     Example:
         img_paths = preprocess_ndvi_difference_dataset(gdf, "output_dir", years=(2015, 2020))
     """
+
+    def collect_image_paths(df):
+        directories = df[image_directory_column]
+        filenames = df[image_filename_column]
+        return (
+            Path(dir_path) / file_name
+            for dir_path, file_name in zip(directories, filenames)
+        )
+
     if years is None:
-
-        def all_images(df):
-            images = df.loc[:, img_path_col].unique().tolist()
-            return images
-
-        get_filepaths = all_images
+        image_paths = collect_image_paths(gdf)
     else:
+        filtered_gdf = gdf[
+            (gdf[start_year_column] == int(years[0]))
+            & (gdf[end_year_column] == int(years[1]))
+        ]
+        image_paths = collect_image_paths(filtered_gdf)
 
-        def match_years(df):
-            start_year = int(years[0])
-            end_year = int(years[1])
-            return (
-                df.loc[
-                    (df[start_year_col] == start_year) & (df[end_year_col] == end_year),
-                    img_path_col,
-                ]
-                .unique()
-                .tolist()
-            )
+    image_paths = list(set(image_paths))
 
-        get_filepaths = match_years
-
-    img_paths = pathify(get_filepaths(gdf))
-    if not isinstance(img_paths, list):
-        img_paths = [img_paths]
-
-    if len(img_paths) == 0:
+    if len(image_paths) == 0:
         raise Exception("Could not find images")
 
     output_dir = output_dir if isinstance(output_dir, Path) else Path(output_dir)
@@ -93,7 +79,115 @@ def preprocess_ndvi_difference_dataset(
     if clean_dest:
         clear_directory(output_dir)
 
-    return img_paths
+    return image_paths
+
+
+def multiprocess_create_raster_tiles(
+    gdf: gpd.GeoDataFrame,
+    target_imgs: list[Path],
+    output_dir: Path,
+    tile_size: int | tuple[int, int],
+    *,
+    exist_ok: bool,
+    filter_geometry: Callable,
+    stride: int | tuple[int, int] | None = None,
+    num_workers: int = NUM_CPU,
+):
+    """
+    Creates raster tiles from a list of input images using multiprocessing.
+
+    Parameters:
+        gdf (GeoDataFrame): The GeoDataFrame containing spatial reference information.
+        target_imgs (list[Path]): A list of file paths to the raster images to be processed.
+        output_dir (Path): The directory where output tiles will be saved.
+        tile_size (int | tuple[int, int]): The size of each tile in pixels.
+        exist_ok (bool): Whether to overwrite existing tiles if they already exist.
+        filter_geometry (Callable): A function used to filter geometries within the tiles.
+        num_workers (int): Number of parallel processes to use (default: NUM_CPU).
+
+    Yields:
+        Path: The file path of each completed raster tile.
+
+    Explanation:
+        - Uses multiprocessing to create raster tiles from a set of input images.
+        - A progress bar is managed for each image using a dictionary (`pbar_map`).
+        - Each image is processed in a separate worker process using `ProcessPoolExecutor`.
+        - The `progress_queue` tracks tile generation progress and updates the progress bars.
+        - Completed tiles are yielded one by one, and exceptions from worker processes are handled.
+    """
+    pbar_map = dict()
+
+    def update_pbar(pbar_map, path: Path, updates: int, total_updates: int):
+        """
+        Callback to update the progress bar for a specific image.
+        """
+        if not pbar_map.get(path.stem):
+            return
+        pbar = pbar_map[path.stem]["pbar"]
+        if not pbar_map[path.stem]["initialized"]:
+            pbar.reset(total_updates)
+            pbar.set_description(f"Processing {path.stem}")
+            pbar_map[path.stem]["initialized"] = True
+        pbar.update(updates)
+
+    def close_pbar(pbar_map, path: Path):
+        pbar_group = pbar_map.get(path.stem)
+        if pbar_group is not None:
+            pbar = pbar_group["pbar"]
+            pbar.update(pbar.total)
+            pbar.close()
+            pbar_map.pop(path.stem)
+
+    with Manager() as manager:
+        progress_queue = manager.Queue()
+
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            futures = []
+            size = tile_size if tile_size[0] is not None else None
+            for path in target_imgs:
+                pbar_map[path.stem] = {
+                    "pbar": trange(
+                        1, desc=f"Processing {path.name} (Queued)", leave=False
+                    ),
+                    "initialized": False,
+                }
+
+                futures.append(
+                    executor.submit(
+                        create_raster_tiles,
+                        path,
+                        crs=gdf.crs,
+                        tile_size=size,
+                        stride=stride,
+                        output_dir=output_dir / path.stem,
+                        exist_ok=exist_ok,
+                        filter_geometry=filter_geometry,
+                        callback_queue=progress_queue,
+                    )
+                )
+
+            while futures:
+                done_futures = [future for future in futures if future.done()]
+                for future in done_futures:
+                    exception = future.exception()
+                    if exception:
+                        raise exception
+                    path = future.result()[0]
+                    yield path
+                    close_pbar(pbar_map, path)
+                    futures.remove(future)
+
+                try:
+                    while True:
+                        if any([future for future in futures if future.done()]):
+                            break
+                        path, updates, total = progress_queue.get_nowait()
+                        update_pbar(pbar_map, path, updates, total)
+                except Empty:
+                    pass
+
+    for path in target_imgs:
+        close_pbar(pbar_map, path)
 
 
 def preprocess_ndvi_difference_rasters(
@@ -101,12 +195,14 @@ def preprocess_ndvi_difference_rasters(
     output_dir: StrPathLike,
     *,
     years: tuple[int, int] | None = None,
-    img_path_col: str = "path",
-    start_year_col: str = "start_year",
-    end_year_col: str = "end_year",
-    geom_col: str = "geometry",
+    image_directory_column: str = "dirpath",
+    image_filename_column: str = "filename",
+    start_year_column: str = "start_year",
+    end_year_column: str = "end_year",
+    geom_column: str = "geometry",
     filter_geometry: Callable | None = None,
     tile_size: int | tuple[int, int] | None = None,
+    stride: int | tuple[int, int] | None = None,
     exist_ok: bool = False,
     clean_dest: bool = False,
     leave: bool = True,
@@ -139,20 +235,22 @@ def preprocess_ndvi_difference_rasters(
     target_imgs = preprocess_ndvi_difference_dataset(
         gdf,
         output_dir,
-        years,
-        img_path_col,
-        start_year_col,
-        end_year_col,
-        clean_dest,
+        years=years,
+        image_directory_column=image_directory_column,
+        image_filename_column=image_filename_column,
+        start_year_column=start_year_column,
+        end_year_column=end_year_column,
+        clean_dest=clean_dest,
     )
-    tiles_dir = Path(output_dir)
+    tiles_dir = Path(output_dir) / "tif"
+    tiles_dir.mkdir(parents=True, exist_ok=True)
 
     tile_size = tile_size if tile_size is not None else (None, None)
     if not isinstance(tile_size, tuple):
         tile_size = (tile_size, tile_size)
 
     pbar = trange(
-        len(target_imgs) + 2,
+        len(target_imgs),
         desc=f"Creating GeoTIFF tiles of size {f'({tile_size[0]},{tile_size[1]})' if tile_size[0] is not None else 'Default'}",
         leave=leave,
     )
@@ -161,50 +259,48 @@ def preprocess_ndvi_difference_rasters(
         num_workers if num_workers and isinstance(num_workers, int) else NUM_CPU
     )
 
-    start = time()
-    updates = 0
-    total_updates = len(target_imgs)
+    def multiprocess_tiles():
+        nonlocal pbar
+        for _ in multiprocess_create_raster_tiles(
+            gdf,
+            target_imgs,
+            output_dir=tiles_dir,
+            tile_size=tile_size,
+            stride=stride,
+            exist_ok=exist_ok,
+            filter_geometry=filter_geometry,
+            num_workers=num_workers,
+        ):
+            pbar.update()
 
-    # Make the tiles for each GeoTIFF
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = [
-            executor.submit(
-                create_raster_tiles,
-                path,
-                crs=gdf.crs,
-                tile_size=tile_size if tile_size[0] is not None else None,
-                output_dir=tiles_dir / path.stem,
-                exist_ok=exist_ok,
-                filter_geometry=filter_geometry,
-            )
-            for path in target_imgs
-        ]
-        for future in as_completed(futures):
-            exception = future.exception()
-            if exception:
-                raise exception
-            if time() - start >= TQDM_INTERVAL * num_workers:
-                updates += 1
-                start = time()
-                pbar.update()
-        if updates < total_updates:
-            pbar.update(total_updates - updates)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(multiprocess_tiles)
+        while True:
+            if future.done():
+                break
+            sleep(1)
+            pbar.refresh()
+
+    pbar.reset(total=3)
+    pbar.set_description("Mapping geometry by year span")
+    pbar.update()
 
     mapped_gdfs = map_geometries_by_year_span(
         gdf,
         tiles_dir,
-        start_year_col,
-        end_year_col,
+        start_year_column,
+        end_year_column,
         preserve_fields=preserve_fields,
     )
 
     if not len(mapped_gdfs) or mapped_gdfs[0].empty:
         raise ValueError(
-            f"Did not find geometies for years {gdf[start_year_col].iat[0]} to {gdf[end_year_col].iat[0]}"
+            f"Did not find geometies for years {gdf[start_year_column].iat[0]} to {gdf[end_year_column].iat[0]}"
         )
     gdf = gpd.GeoDataFrame(pd.concat(mapped_gdfs, ignore_index=True), crs=gdf.crs)
     gdf.set_geometry("geometry", inplace=True)
 
+    pbar.set_description("Cleaning up...")
     pbar.update()
 
     num_tiles_before = len(
@@ -215,10 +311,13 @@ def preprocess_ndvi_difference_rasters(
             )
         ]
     )
-    pbar.update()
-    pbar.close()
 
-    gdf = cleanup_unused_tiles(gdf, geom_col, img_path_col)
+    gdf = remove_unused_tiles(
+        gdf,
+        geom_column=geom_column,
+        image_directory_column=image_directory_column,
+        image_filename_column=image_filename_column,
+    )
 
     num_tiles_after = len(
         [
@@ -236,10 +335,26 @@ def preprocess_ndvi_difference_rasters(
         )
     )
 
+    pbar.update()
+    pbar.close()
+
     return gpd.GeoDataFrame(
         gdf.drop_duplicates()
-        .sort_values(by=[start_year_col, end_year_col])
+        .sort_values(by=[start_year_column, end_year_column])
         .reset_index(drop=True)
+    )
+
+
+def filter_geometry_caller(
+    filepath, geometry, *, gdf, region_column, start_year_column, end_year_column
+):
+    return gdf_intersects_region_year_geometry(
+        gdf=gdf,
+        filepath=filepath,
+        geometry=geometry,
+        region_column=region_column,
+        start_year_column=start_year_column,
+        end_year_column=end_year_column,
     )
 
 
@@ -254,6 +369,7 @@ def make_ndvi_difference_dataset(
     end_year_col: str = "end_year",
     geom_col: str = "geometry",
     tile_size: int | tuple[int, int] | None = None,
+    stride: int | tuple[int, int] | None = None,
     clean_dest: bool = False,
     translate_xy: bool = True,
     exist_ok: bool = False,
@@ -313,7 +429,7 @@ def make_ndvi_difference_dataset(
     csv_dir = filepaths["csv_dir"]
     shp_dir = filepaths["shp_dir"]
 
-    n_calls = 4
+    n_calls = 5
     n_calls += 1 if translate_xy else 0
     n_calls += 1 if convert_to_png else 0
 
@@ -382,28 +498,36 @@ def make_ndvi_difference_dataset(
     pbar.update()
     pbar.set_description("Creating NDVI dataset - Preprocessing GeoTIFFs")
 
-    gdf = preprocess_ndvi_difference_rasters(
-        gdf,
-        tiles_dir,
-        start_year_col=start_year_col,
-        end_year_col=end_year_col,
-        geom_col=geom_col,
-        years=years,
-        tile_size=tile_size,
-        clean_dest=clean_dest,
-        exist_ok=exist_ok,
-        leave=False,
-        num_workers=num_workers,
-        preserve_fields=preserve_fields,
-        filter_geometry=lambda filepath, geom: gdf_intersects_region_year_geometry(
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            preprocess_ndvi_difference_rasters,
             gdf,
-            filepath=filepath,
-            geometry=geom,
-            region_column=region_col,
+            tiles_dir,
             start_year_column=start_year_col,
             end_year_column=end_year_col,
-        ),
-    )
+            geom_column=geom_col,
+            years=years,
+            tile_size=tile_size,
+            stride=stride,
+            clean_dest=clean_dest,
+            exist_ok=exist_ok,
+            leave=False,
+            num_workers=num_workers,
+            preserve_fields=preserve_fields,
+            filter_geometry=partial(
+                filter_geometry_caller,
+                gdf=gdf,
+                region_column=region_col,
+                start_year_column=start_year_col,
+                end_year_column=end_year_col,
+            ),
+        )
+        while True:
+            if future.done():
+                gdf = future.result()
+                break
+            sleep(1)
+            pbar.refresh()
 
     pbar.update()
 
@@ -423,11 +547,13 @@ def make_ndvi_difference_dataset(
             )
 
     if translate_xy:
-        pbar.update()
         pbar.set_description("Creating NDVI dataset - Translating xy coords to index")
 
         gdf = translate_xy_coords_to_index(gdf)
-        gdf = cleanup_unused_tiles(gdf, geom_col, "path")
+        pbar.update()
+
+        pbar.set_description("Cleaning up...")
+        gdf = remove_unused_tiles(gdf, geom_col, "dirpath", "filename")
 
         if save_csv or save_shp:
             ds_name = str(ds_name).replace("_xy", "_indexed")
@@ -446,23 +572,27 @@ def make_ndvi_difference_dataset(
                     gdf,
                     shp_dir / ds_name.with_suffix(".gpkg"),
                 )
+        pbar.update()
 
     if convert_to_png:
-        pbar.update()
         pbar.set_description("Creating NDVI dataset - Converting GeoTIFFs to PNGs")
 
         tif_png_file_map = process_raster_to_png_conversion(
-            tiles_dir, tiles_dir.parent / "png-tiles", leave=False
+            tiles_dir / "tif", tiles_dir / "png", leave=True
         )
-        spbar = trange(len(gdf), desc="Mapping filepaths", leave=False)
+        pbar.update()
+
+        pbar.reset(total=len(gdf))
+        pbar.set_description("Creating NDVI dataset - Mapping filepaths")
+
         for i, row in gdf.iterrows():
             tif_file = str(row["filename"])
             paths = tif_png_file_map.get(Path(tif_file).stem)
             if paths is not None:
                 gdf.loc[i, "filename"] = paths["png"].name
-                gdf.loc[i, "path"] = paths["png"]
-            spbar.update()
-        spbar.close()
+                gdf.loc[i, "dirpath"] = paths["png"].parent
+            pbar.update()
+
         if save_csv or save_shp:
             ds_name = Path(f"{ds_name}_as_png")
             if save_csv:
@@ -477,6 +607,12 @@ def make_ndvi_difference_dataset(
                     gdf,
                     shp_dir / ds_name.with_suffix(".gpkg"),
                 )
+
+        pbar.reset(total=n_calls)
+        pbar.update(n_calls - 1)
+
+    pbar.set_description("Cleaning up...")
+    gdf = remove_unused_tiles(gdf, geom_col, "dirpath", "filename")
 
     pbar.update()
     pbar.set_description("Creating NDVI dataset - Complete")
