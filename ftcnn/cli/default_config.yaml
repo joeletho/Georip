@@ -1,0 +1,101 @@
+# Default arguments for ftcnn/cli
+
+# Path to the shapefile. This is a required argument and should be specified when running the CLI.
+shapefile: ''  # e.g., 'path/to/shapefile.shp'
+
+# Directory containing images. This is a required argument and should be specified when running the CLI.
+image_dir: ''  # e.g., 'path/to/images'
+
+# Directory where processed data will be saved. This is a required argument and should be specified when running the CLI.
+output_dir: ''  # e.g., 'path/to/output'
+
+# Column name for regions in the shapefile. This is a required argument and should be specified when running the CLI.
+region_column: ''  # e.g., 'region_name' or 'region_column'
+
+# Column name for the start year in the shapefile. This is a required argument and should be specified when running the CLI.
+year_start_column: ''  # e.g., 'StartYear'
+
+# Column name for the end year in the shapefile. This is a required argument and should be specified when running the CLI.
+year_end_column: ''  # e.g., 'EndYear'
+
+# Column name for the geometry data in the shapefile (default is 'geometry').
+geometry_column: 'geometry'  # e.g., 'geometry'
+
+# Range of years to compute NDVI difference (start, end). Set to null to compute differences between sequential years.
+years: null  # e.g., '[2015, 2016]'
+
+# Ratio for selecting background data, typically between 0 and 1.
+background_ratio: 1.0  # e.g., 0.5 for 50% background data
+
+# Path to the background filter callback function, or set to null if not used.
+background_filter: null  # e.g., 'path/to/module.func_name'
+
+
+# Seed value for background generation, or null to disable.
+background_seed: null  # e.g., 42 for reproducibility or null
+
+# Split mode for the dataset: 'all' or 'collection'.
+split_mode: 'all'  # e.g., 'all' for the whole dataset or 'collection' for subsets
+
+# Ratio of data to use for training (0 to 1). e.g., 0.7 means 70% training data.
+train_split_ratio: 0.7  # e.g., 0.8 for 80% training data
+
+# Ratio of data to use for testing (0 to 1).
+test_split_ratio: 0.1  # e.g., 0.2 for 20% testing data
+
+# Whether to shuffle the data before splitting (true/false).
+shuffle_split: true  # e.g., true or false
+
+# Seed for the shuffle split. If null, a random seed will be used.
+shuffle_seed: null  # e.g., 1234 for reproducibility or null
+
+# Whether to stratify the split by class (true/false).
+stratify: true  # e.g., true for stratified splitting, false otherwise
+
+# Whether to generate labels (true/false).
+generate_labels: true  # e.g., true for generating labels
+
+# Whether to generate training data (true/false).
+generate_train_data: true  # e.g., true for generating training data
+
+# Tile size for image tiling. Can be a single integer (e.g., 640) or 'width,height' (e.g., '640,640').
+tile_size: '640'  # e.g., '640,640' for square tiles or '640' for width only (square)
+
+# Stride for tiling (optional). Can be a single integer or 'width,stride' (e.g., 100 or '100,100').
+stride: null  # e.g., '100' for uniform stride or null for no stride
+
+# Whether to apply translation to x and y coordinates (true/false).
+translate_xy: true  # e.g., true to translate coordinates
+
+# Path to the class encoding function, or set to null if not used.
+class_encoder: null  # e.g., 'path/to/module.func_name'
+
+# Whether to allow overwriting existing output files or directories (true/false).
+exist_ok: false  # e.g., true to allow overwriting
+
+# Whether to clear the output directory before saving new data (true/false).
+clear_output_dir: true  # e.g., true to clear the directory
+
+# Whether to save the shapefile in the output (true/false).
+save_shp: true  # e.g., true to save shapefile
+
+# Whether to save the output as a GeoPackage (true/false).
+save_gpkg: true  # e.g., true to save as .gpkg format
+
+# Whether to save the output as CSV (true/false).
+save_csv: true  # e.g., true to save as .csv format
+
+# Whether to leave the progress bar after completion (true/false).
+pbar_leave: false  # e.g., true to leave the progress bar displayed
+
+# Whether to convert images to PNG format (true/false).
+convert_to_png: true  # e.g., true to convert images to PNG
+
+# Whether to use segmentation for image data (true/false).
+use_segments: true  # e.g., true to use segments for processing
+
+# Number of workers for parallel processing. Can be any positive integer.
+num_workers: 8  # e.g., 4 for 4 workers or 8 for 8 workers
+
+# List of fields to preserve or rename. Can be comma-separated field names, or a dictionary for renaming fields (e.g., {'oldField': 'newField'}).
+preserve_fields: null
