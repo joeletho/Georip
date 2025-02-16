@@ -13,8 +13,13 @@ def create_ndvi_difference_dataset(cls, config):
     if config["clear_output_dir"]:
         clear_directory(config["output_dir"])
 
+    yaml_path = config["config_dir"] / "args.yaml"
     save_as_yaml(
-        config, config["config_dir"] / "args.yaml", parents=True, exist_ok=True
+        config,
+        yaml_path,
+        parents=True,
+        exist_ok=True,
+        message=f"Argument list saved to {yaml_path}",
     )
 
     config["clear_output_dir"] = False

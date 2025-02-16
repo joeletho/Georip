@@ -209,10 +209,11 @@ def save_as_yaml(
     data: dict | argparse.Namespace,
     filepath: StrPathLike,
     *,
-    mode="w+",
-    verbose=True,
-    parents=False,
-    exist_ok=False,
+    mode: str = "w+",
+    verbose: bool = True,
+    parents: bool = False,
+    exist_ok: bool = False,
+    message: str | None = None,
 ):
     """
     Saves a dictionary to a YAML file, converting Path objects to strings.
@@ -251,4 +252,7 @@ def save_as_yaml(
         yaml.dump(cleaned_data, f, default_flow_style=False)
 
     if verbose:
-        print(f"Dictionary saved to {str(filepath)}")
+        if message is None:
+            print(f"Dictionary saved to {str(filepath)}")
+        else:
+            print(message)
