@@ -1,8 +1,9 @@
+import argparse
 import shutil
 from pathlib import Path
 
 import geopandas as gpd
-
+import yaml
 from ftcnn.geospacial import DataFrameLike
 from ftcnn.utils import StrPathLike
 
@@ -15,6 +16,7 @@ __all__ = [
     "load_shapefile",
     "load_geo_dataframe",
     "open_geo_dataset",
+    "save_as_yaml",
 ]
 
 
@@ -201,3 +203,52 @@ def save_as_csv(df: DataFrameLike, path: StrPathLike, exist_ok: bool = False) ->
         path.parent.mkdir(parents=True, exist_ok=True)
 
     df.to_csv(path, index=False)
+
+
+def save_as_yaml(
+    data: dict | argparse.Namespace,
+    filepath: StrPathLike,
+    *,
+    mode="w+",
+    verbose=True,
+    parents=False,
+    exist_ok=False,
+):
+    """
+    Saves a dictionary to a YAML file, converting Path objects to strings.
+
+    Args:
+        data (dict | argparse.Namespace): The dictionary or Namespace to save.
+        filename (StrPathLike): The output YAML file path, including filename.
+        mode (str): The file mode for writing to the file.
+        verbose (bool): The flag to print the completion message.
+        parents (bool): The flag to create parent directories if they do not already exist.
+        exist_ok (bool): The flag to allow overwriting an already-existing file.
+    """
+    filepath = Path(filepath).resolve()
+
+    if isinstance(data, argparse.Namespace):
+        data = vars(data)
+
+    def convert_paths(obj):
+        if isinstance(obj, Path):
+            return str(obj)
+        elif isinstance(obj, dict):
+            return {key: convert_paths(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_paths(item) for item in obj]
+        return obj
+
+    cleaned_data = convert_paths(data)
+
+    if not filepath.exists():
+        filepath.parent.mkdir(parents=parents, exist_ok=exist_ok)
+
+    if not exist_ok:
+        raise FileExistsError(f"{str(filepath)} already exists")
+
+    with open(filepath, mode) as f:
+        yaml.dump(cleaned_data, f, default_flow_style=False)
+
+    if verbose:
+        print(f"Dictionary saved to {str(filepath)}")

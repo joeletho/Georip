@@ -8,8 +8,6 @@ from typing import Callable
 
 import geopandas as gpd
 import pandas as pd
-from tqdm.auto import trange
-
 from ftcnn.datasets.utils import (TMP_FILE_PREFIX, StrPathLike,
                                   init_dataset_filepaths, remove_unused_tiles)
 from ftcnn.geospacial.mapping import map_geometries_by_year_span
@@ -21,6 +19,7 @@ from ftcnn.io import (clear_directory, collect_files_with_suffix, save_as_csv,
 from ftcnn.raster.tools import (create_raster_tiles,
                                 process_raster_to_png_conversion)
 from ftcnn.utils import NUM_CPU
+from tqdm.auto import trange
 
 
 def preprocess_ndvi_difference_dataset(
@@ -422,9 +421,9 @@ def make_ndvi_difference_dataset(
         clean_dest=clean_dest,
     )
 
-    source_shp = filepaths["source_shp"]
+    source_shp = filepaths["shapefile"]
     output_dir = filepaths["output_dir"]
-    source_images_dir = filepaths["source_images_dir"]
+    source_images_dir = filepaths["image_dir_src"]
     tiles_dir = filepaths["tiles_dir"]
     csv_dir = filepaths["csv_dir"]
     shp_dir = filepaths["shp_dir"]

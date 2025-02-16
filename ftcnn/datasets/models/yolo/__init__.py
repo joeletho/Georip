@@ -1,12 +1,13 @@
 from collections.abc import Callable
-from os import PathLike
 from pathlib import Path
 from typing import Any
 
 from ftcnn.datasets.models.yolo.utils import create_ndvi_difference_dataset
 from ftcnn.geospacial import DataFrameLike
+from ftcnn.io import save_as_yaml
 from ftcnn.modeling.utils import AnnotatedLabel, DatasetSplitMode, ImageData
 from ftcnn.modeling.yolo import YOLODatasetBase
+from ftcnn.utils import StrPathLike
 
 __all__ = ["YOLONDVIDifferenceDataset"]
 
@@ -35,9 +36,9 @@ class YOLONDVIDifferenceDataset(YOLODatasetBase):
 
     @staticmethod
     def create(
-        source: PathLike | DataFrameLike,
-        image_dir: PathLike,
-        output_dir: PathLike,
+        source: StrPathLike | DataFrameLike,
+        image_dir: StrPathLike,
+        output_dir: StrPathLike,
         *,
         region_column: str | list[str],
         year_start_column: str,
@@ -46,6 +47,7 @@ class YOLONDVIDifferenceDataset(YOLODatasetBase):
         class_names: str | list[str],
         geometry_column: str = "geometry",
         years: None | tuple[int, int] = None,
+        background_shapefile: StrPathLike | None = None,
         background_ratio: float = 1.0,
         background_filter: bool | Callable | None = None,
         background_seed: int | None = None,
@@ -91,6 +93,7 @@ class YOLONDVIDifferenceDataset(YOLODatasetBase):
             "class_names": class_names,
             "geometry_column": geometry_column,
             "years": years,
+            "background_shapefile": background_shapefile,
             "background_ratio": background_ratio,
             "background_filter": background_filter,
             "background_seed": background_seed,
@@ -117,4 +120,5 @@ class YOLONDVIDifferenceDataset(YOLODatasetBase):
             "num_workers": num_workers,
             "preserve_fields": preserve_fields,
         }
+
         return create_ndvi_difference_dataset(YOLONDVIDifferenceDataset, config)

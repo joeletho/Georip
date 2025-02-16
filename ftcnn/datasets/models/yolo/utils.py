@@ -1,21 +1,30 @@
 from concurrent.futures import ThreadPoolExecutor
 from time import sleep
 
-from tqdm.auto import trange
-
 from ftcnn.datasets.models.tools import build_ndvi_difference_dataset
+from ftcnn.io import clear_directory, save_as_yaml
 from ftcnn.modeling.yolo.conversion import geodataframe_to_yolo
 from ftcnn.utils import NUM_CPU
+from tqdm.auto import trange
 
 
 def create_ndvi_difference_dataset(cls, config):
+    # Clear now so we can start to save data
+    if config["clear_output_dir"]:
+        clear_directory(config["output_dir"])
+
+    save_as_yaml(
+        config, config["config_dir"] / "args.yaml", parents=True, exist_ok=True
+    )
+
+    config["clear_output_dir"] = False
+
     pbar_leave = config["pbar_leave"]
     num_workers = config["num_workers"]
     generate_labels = config["generate_labels"]
     generate_train_data = config["generate_train_data"]
     generate_data = generate_labels or generate_train_data
 
-    config["pbar_leave"] = False
     gdf = build_ndvi_difference_dataset(config)
 
     total_updates = 1
@@ -57,7 +66,7 @@ def create_ndvi_difference_dataset(cls, config):
             def process_generate_labels():
                 ndvi_ds.generate_label_files(
                     dest_path=config["label_dir_dest"] / "generated",
-                    clear_dir=config["clear_output_dir"],
+                    clear_dir=False,
                     overwrite_existing=config["exist_ok"],
                     use_segments=config["use_segments"],
                 )

@@ -8,10 +8,6 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import shapely
-from rasterio import DatasetReader, rasterio
-from shapely import MultiPolygon, Polygon
-from tqdm.auto import trange
-
 from ftcnn.geometry import PolygonLike
 from ftcnn.geometry.polygons import get_polygon_points, is_sparse_polygon
 from ftcnn.geospacial import DataFrameLike
@@ -19,6 +15,9 @@ from ftcnn.geospacial.conversion import (translate_polygon_index_to_xy,
                                          translate_polygon_xy_to_index)
 from ftcnn.raster import create_window
 from ftcnn.utils import StrPathLike
+from rasterio import DatasetReader, rasterio
+from shapely import MultiPolygon, Polygon
+from tqdm.auto import trange
 
 
 def collect_filepaths(df: DataFrameLike, column_name: str) -> list[str]:
@@ -615,4 +614,35 @@ def clip_geometries_to_rasters(
         )
         # Update the original gdf
         gdf.loc[clipped_gdf.index, geometry_column] = clipped_gdf[geometry_column]
+    return gdf
+
+
+def update_region_bbox(
+    gdf: gpd.GeoDataFrame, region_column, image_files: list[Path]
+) -> gpd.GeoDataFrame:
+    """
+    Updates the 'region' column in the GeoDataFrame based on intersections with image boundaries.
+
+    Args:
+        gdf (gpd.GeoDataFrame): The GeoDataFrame with geometries to check.
+        image_files (list[str]): List of image filenames containing gee_region info.
+
+    Returns:
+        gpd.GeoDataFrame: The updated GeoDataFrame with the 'region' column set.
+    """
+    if region_column not in gdf.columns:
+        gdf[region_column] = None
+
+    for image_file in image_files:
+        region = image_file.stem.split("_")[0]
+        with rasterio.open(image_file) as src:
+            bounds = src.bounds
+            region_geometry = shapely.box(
+                bounds.left, bounds.bottom, bounds.right, bounds.top
+            )
+
+        # Check for intersections with the image region and update 'region'
+        intersect_mask = gdf.geometry.intersects(region_geometry)
+        gdf.loc[intersect_mask, region_column] = region
+
     return gdf

@@ -3,14 +3,15 @@ import time
 from pathlib import Path
 from typing import Callable
 
+import ftcnn.io as io
 import geopandas as gpd
-from geopandas.geoseries import shapely
-
+import pandas as pd
 from ftcnn.geometry.polygons import is_sparse_polygon
 from ftcnn.geospacial import DataFrameLike
-from ftcnn.io import clear_directory, save_as_shp
+from ftcnn.geospacial.utils import update_region_bbox
 from ftcnn.io.geospacial import load_shapefile
 from ftcnn.utils import FTCNN_TMP_DIR, StrPathLike
+from geopandas.geoseries import shapely
 
 TMP_FILE_PREFIX = "tmp__"
 
@@ -36,7 +37,7 @@ def init_dataset_filepaths(
     shp_dir: Path = meta_dir / "shp" / source_shp.stem
 
     if output_dir.exists() and clean_dest:
-        clear_directory(output_dir)
+        io.clear_directory(output_dir)
     elif not output_dir.exists():
         output_dir.mkdir(parents=True)
 
@@ -48,9 +49,9 @@ def init_dataset_filepaths(
     tiles_dir: Path = output_dir / "images" / "tiles"
     tiles_dir.mkdir(parents=True, exist_ok=exist_ok)
     return {
-        "source_shp": Path(source_shp),
+        "shapefile": Path(source_shp),
         "output_dir": Path(output_dir),
-        "source_images_dir": Path(source_images_dir),
+        "image_dir_src": Path(source_images_dir),
         "tiles_dir": Path(tiles_dir),
         "meta_dir": Path(meta_dir),
         "csv_dir": Path(csv_dir),
@@ -182,9 +183,121 @@ def preprocess_geo_source(
         source_path = (
             FTCNN_TMP_DIR / f"{TMP_FILE_PREFIX}preprocess_geo_source_{timestamp}.shp"
         )
-        save_as_shp(source, source_path)
+        io.save_as_shp(source, source_path)
         return preprocess_geo_source(source_path, geometry_column)
     return Path(source)
+
+
+def merge_source_and_background(config):
+    filepaths = init_dataset_filepaths(
+        source_shp=config["shapefile"],
+        source_images_dir=config["image_dir_src"],
+        output_dir=config["output_dir"],
+        exist_ok=config["exist_ok"],
+        save_csv=config["save_csv"],
+        save_shp=config["save_shp"],
+        save_gpkg=config["save_gpkg"],
+        clean_dest=config["clear_output_dir"],
+    )
+    shapefile = filepaths["shapefile"]
+    image_dir = filepaths["image_dir_src"]
+    shp_dir = filepaths["shp_dir"]
+    csv_dir = filepaths["csv_dir"]
+
+    # Declare the path of the base files used for this dataset
+    BASE_FILEPATH = Path(f"base_{shapefile.stem}")
+
+    # Load the source shapefile
+    gdf_source = io.load_shapefile(shapefile)
+
+    # Fix a typo in the column name
+    if gdf_source.get("gee_eregio") is not None:
+        gdf_source.rename(columns={"gee_eregio": "gee_region"}, inplace=True)
+        io.save_as_shp(gdf_source, shapefile, exist_ok=True)
+    gdf_source.sort_values(by=[config["region_column"], config["class_column"]])
+
+    gdf_source = gdf_source.drop(
+        index=gdf_source.loc[
+            ~gdf_source[config["class_column"]].isin(config["class_names"])
+        ].index
+    )
+    gdf_source = gdf_source.sort_values(
+        by=[config["region_column"], config["class_column"]]
+    ).reset_index(drop=True)
+
+    source_shp_path = shp_dir / BASE_FILEPATH.with_suffix(".shp")
+    io.save_as_csv(
+        gdf_source,
+        csv_dir / BASE_FILEPATH.with_suffix(".csv"),
+        exist_ok=True,
+    )
+    io.save_as_shp(gdf_source, source_shp_path, exist_ok=True)
+
+    # Handle background first to be added to the source
+    gdf_background = io.load_shapefile(config["background_shapefile"])
+
+    # Fix a typo in the column name
+    if gdf_background.get("gee_eregio") is not None:
+        gdf_background.rename(columns={"gee_eregio": "gee_region"}, inplace=True)
+        io.save_as_shp(gdf_background, config["background_shapefile"], exist_ok=True)
+
+    if not gdf_background.crs:
+        gdf_background = gdf_background.set_crs(gdf_source.crs)
+    else:
+        gdf_background = gdf_background.to_crs(gdf_source.crs)
+
+    gdf_background = gdf_background.sample(
+        n=len(gdf_source) * 2, random_state=config["background_seed"]
+    )
+    gdf_background = gdf_background.reindex(
+        columns=gdf_source.columns, fill_value="None"
+    )
+    gdf_background = update_region_bbox(
+        gdf_background,
+        config["region_column"],
+        io.collect_files_with_suffix(".tiff", image_dir, recurse=True),
+    )
+
+    background_save_name = Path(f"background_{BASE_FILEPATH}")
+    background_shp_path = shp_dir / background_save_name.with_suffix(".shp")
+    io.save_as_csv(
+        gdf_background,
+        csv_dir / background_save_name.with_suffix(".csv"),
+        exist_ok=True,
+    )
+    io.save_as_shp(gdf_background, background_shp_path, exist_ok=True)
+    # Merge the source and background dataframes
+    source_merged = (
+        gpd.GeoDataFrame(
+            pd.concat([gdf_source, gdf_background], ignore_index=True),
+            crs=gdf_source.crs,
+        )
+        .sort_values(
+            by=[
+                config["year_start_column"],
+                config["class_column"],
+                config["region_column"],
+            ]
+        )
+        .reset_index(drop=True)
+    )
+
+    source_merged = source_merged.drop(
+        index=source_merged[
+            source_merged[config["year_start_column"]].astype(int) == 0
+        ].index
+    ).reset_index(drop=True)
+
+    source_merged_save_name = Path(f"{BASE_FILEPATH}_merged")
+    source_merged_shp_path = shp_dir / source_merged_save_name.with_suffix(".shp")
+    io.save_as_csv(
+        source_merged,
+        csv_dir / source_merged_save_name.with_suffix(".csv"),
+        exist_ok=True,
+    )
+    io.save_as_shp(source_merged, source_merged_shp_path, exist_ok=True)
+
+    return source_merged_shp_path
 
 
 def postprocess_geo_source(

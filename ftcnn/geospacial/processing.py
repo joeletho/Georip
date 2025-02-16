@@ -1,14 +1,13 @@
 from typing import Union
 
 import geopandas as gpd
-from tqdm.auto import trange
-
 from ftcnn.geometry.polygons import flatten_polygons
 from ftcnn.geospacial.mapping import map_metadata
 from ftcnn.geospacial.utils import gdf_matches_image_crs, gdf_set_crs_to_image
 from ftcnn.io import collect_files_with_suffix
 from ftcnn.io.geospacial import load_shapefile
 from ftcnn.utils import StrPathLike
+from tqdm.auto import trange
 
 
 def preprocess_ndvi_shapefile(
@@ -77,19 +76,7 @@ def preprocess_ndvi_shapefile(
         preserve_fields=preserve_fields,
     )
     pbar.update()
-
-    # print("After mapping metadata:\n", gdf)
-
-    # pbar.set_description("Clipping geometries within bounds of rasters")
-    # pbar.refresh()
-    #
-    # gdf = clip_geometries_to_rasters(gdf, base_images, "path")
-    # gdf = gdf[~gdf["geometry"].is_empty]
-    # pbar.update()
-
     pbar.close()
-
-    # print("After clipping geometry:\n", gdf)
 
     if not len(gdf):
         raise ValueError("Shapefile does not contain valid metadata")
