@@ -1,30 +1,28 @@
-import os
 from time import time
 
 import geopandas as gpd
 import pandas as pd
+from ftcnn.datasets.utils import TMP_FILE_PREFIX
+from ftcnn.geometry import stringify_points
+from ftcnn.modeling.utils import (AnnotatedLabel, BBox,
+                                  convert_segmented_to_bbox_annotation,
+                                  parse_images_from_labels,
+                                  parse_labels_from_dataframe)
+from ftcnn.modeling.yolo import YOLODatasetBase
+from ftcnn.utils import FTCNN_TMP_DIR, NUM_CPU
 from PIL import Image
 from tqdm.auto import tqdm, trange
 
-from ftcnn.datasets.utils import TMP_FILE_PREFIX
-from ftcnn.geometry import stringify_points
-from ftcnn.modeling.utils import (
-    AnnotatedLabel,
-    BBox,
-    convert_segmented_to_bbox_annotation,
-    parse_images_from_labels,
-    parse_labels_from_dataframe,
-)
-from ftcnn.modeling.yolo import YOLODatasetBase
-from ftcnn.utils import FTCNN_TMP_DIR, NUM_CPU
 
-
-def geodataframe_to_yolo(gdf: gpd.GeoDataFrame, compile=True) -> YOLODatasetBase:
+def geodataframe_to_yolo(
+    gdf: gpd.GeoDataFrame, geometry_column: str = "geometry", compile=True
+) -> YOLODatasetBase:
     """
     Converts a GeoDataFrame into a YOLO dataset format.
 
     Parameters:
         gdf (GeoDataFrame): A GeoDataFrame containing the labeled data.
+        geometry_column (str): The name of the column containing geometry. Default is "geometry".
         compile (bool, optional): Whether to compile the dataset. Defaults to True.
 
     Returns:
@@ -34,7 +32,7 @@ def geodataframe_to_yolo(gdf: gpd.GeoDataFrame, compile=True) -> YOLODatasetBase
         yolo_ds = geodataframe_to_yolo(gdf)
     """
     gdf = gdf.copy()
-    gdf["geometry"] = gdf["geometry"].apply(
+    gdf[geometry_column] = gdf[geometry_column].apply(
         lambda x: stringify_points(x.exterior.coords)
     )
     tmp_path = FTCNN_TMP_DIR / f"{TMP_FILE_PREFIX}yolo_ds_{time()}.csv"
@@ -44,16 +42,16 @@ def geodataframe_to_yolo(gdf: gpd.GeoDataFrame, compile=True) -> YOLODatasetBase
     try:
         ds = YOLODatasetBase.from_csv(
             tmp_path,
-            segments_key="geometry",
+            segments_key=geometry_column,
             convert_bounds_to_bbox=True,
             num_workers=num_workers,
             compile=compile,
         )
-        if os.path.isfile(tmp_path):
-            os.remove(tmp_path)
+        if tmp_path.exists():
+            tmp_path.unlink()
     except Exception as e:
-        if os.path.isfile(tmp_path):
-            os.remove(tmp_path)
+        if tmp_path.exists():
+            tmp_path.unlink()
         raise e
     return ds
 

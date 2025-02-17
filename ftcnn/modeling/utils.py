@@ -18,14 +18,13 @@ import rasterio
 import skimage
 import supervision as sv
 import torch
+from ftcnn.io import collect_files_with_suffix, pathify
+from ftcnn.utils import StrPathLike
 from matplotlib import pyplot as plt
 from numpy import NaN
 from PIL import Image
 from torchvision.transforms import v2 as T
 from tqdm.auto import tqdm, trange
-
-from ftcnn.io import collect_files_with_suffix, pathify
-from ftcnn.utils import StrPathLike
 
 XYPair = tuple[float | int, float | int]
 XYInt = tuple[int, int]
@@ -307,11 +306,15 @@ def parse_labels_from_csv(
 
         if not ignore_errors:
             if data.get("class_id") is None:
-                raise ValueError(f"Row index {i}: key '{class_id_key}' not found")
+                raise ValueError(f"Row index {i}: key '{class_id_key}' not found:", row)
             if data.get("class_name") is None:
-                raise ValueError(f"Row index {i}: key '{class_name_key}' not found")
+                raise ValueError(
+                    f"Row index {i}: key '{class_name_key}' not found:", row
+                )
             if data.get("filename") is None:
-                raise ValueError(f"Row index {i}: key '{image_filename_key}' not found")
+                raise ValueError(
+                    f"Row index {i}: key '{image_filename_key}' not found:", row
+                )
 
         type = str(data["type"])
         if len(type) > 0 or not type[0].isalnum():

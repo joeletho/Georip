@@ -257,6 +257,7 @@ def merge_source_and_background(config):
         config["region_column"],
         io.collect_files_with_suffix(".tiff", image_dir, recurse=True),
     )
+    gdf_background[config["class_column"]] = "Background"
 
     background_save_name = Path(f"background_{BASE_FILEPATH}")
     background_shp_path = shp_dir / background_save_name.with_suffix(".shp")

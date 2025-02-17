@@ -170,6 +170,8 @@ def build_ndvi_difference_dataset(config: dict[str, Any]):
         _WRITE_LOCK.free(lock_id)
         gdf = gpd.GeoDataFrame(pd.concat([truth_gdf, background_gdf]), crs=gdf.crs)
 
+    gdf.set_geometry(geometry_column)
+
     pbar.set_description("Creating NDVI Difference dataset - Finishing up")
     pbar.update()
 

@@ -39,7 +39,7 @@ def create_ndvi_difference_dataset(cls, config):
         desc=f"Creating YOLO dataset - Creating YOLODataset with {len(gdf)} labels",
         leave=pbar_leave,
     )
-    yolo_ds = geodataframe_to_yolo(gdf)
+    yolo_ds = geodataframe_to_yolo(gdf, config["geometry_column"])
 
     if config["save_csv"]:
         yolo_ds.to_csv(config["meta_dir"] / "csv" / "yolo_ds_base.csv")
