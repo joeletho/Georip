@@ -10,7 +10,7 @@ from tqdm.auto import trange
 
 def create_ndvi_difference_dataset(cls, config):
     # Clear now so we can start to save data
-    if config["clear_output_dir"]:
+    if config["clear_output_dir"] and config["output_dir"].exists():
         clear_directory(config["output_dir"])
 
     yaml_path = config["config_dir"] / "args.yaml"
