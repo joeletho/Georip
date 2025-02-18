@@ -18,13 +18,14 @@ import rasterio
 import skimage
 import supervision as sv
 import torch
-from ftcnn.io import collect_files_with_suffix, pathify
-from ftcnn.utils import StrPathLike
 from matplotlib import pyplot as plt
 from numpy import NaN
 from PIL import Image
 from torchvision.transforms import v2 as T
 from tqdm.auto import tqdm, trange
+
+from ftcnn.io import collect_files_with_suffix, pathify
+from ftcnn.utils import StrPathLike
 
 XYPair = tuple[float | int, float | int]
 XYInt = tuple[int, int]
@@ -1171,6 +1172,9 @@ def display_ground_truth_and_predicted_images(
     show=True,
     include_background=False,
     verbose=True,
+    font_size=12,
+    line_width=2,
+    text_offset=0,
 ):
     # Get the image and target from the dataset at index `idx`
     gt_image, target = dataset[idx]
@@ -1220,7 +1224,7 @@ def display_ground_truth_and_predicted_images(
     for box, label in zip(boxes, labels):
         x1, y1, x2, y2 = box
         rect = patches.Rectangle(
-            (x1, y1), x2 - x1, y2 - y1, linewidth=2, edgecolor="red", facecolor="none"
+            (x1, y1), x2 - x1, y2 - y1, linewidth=line_width, edgecolor="red", facecolor="none"
         )
         ax1.add_patch(rect)
 
@@ -1230,9 +1234,9 @@ def display_ground_truth_and_predicted_images(
         # Add class name text above the bounding box
         ax1.text(
             x1,
-            y1 - 10,  # Slightly above the bounding box
+            y1 - text_offset,  # Slightly above the bounding box
             class_name,
-            fontsize=12,
+            fontsize=font_size,
             color="red",
             bbox=dict(facecolor="yellow", alpha=0.5, edgecolor="none", pad=2),
         )

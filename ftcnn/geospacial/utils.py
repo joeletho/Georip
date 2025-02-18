@@ -8,6 +8,10 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import shapely
+from rasterio import DatasetReader, rasterio
+from shapely import MultiPolygon, Polygon
+from tqdm.auto import trange
+
 from ftcnn.geometry import PolygonLike
 from ftcnn.geometry.polygons import get_polygon_points, is_sparse_polygon
 from ftcnn.geospacial import DataFrameLike
@@ -15,9 +19,6 @@ from ftcnn.geospacial.conversion import (translate_polygon_index_to_xy,
                                          translate_polygon_xy_to_index)
 from ftcnn.raster import create_window
 from ftcnn.utils import StrPathLike
-from rasterio import DatasetReader, rasterio
-from shapely import MultiPolygon, Polygon
-from tqdm.auto import trange
 
 
 def collect_filepaths(df: DataFrameLike, column_name: str) -> list[str]:
@@ -105,15 +106,9 @@ def parse_region_and_years_from_path(
     if "extended" in years.lower():
         region = region + "E"
         years = parts[2]
-    elif region[-2:].isnumeric():
-        start = 0
-        while start < len(region) and not region[start].isdigit():
-            start += 1
-        if start >= len(region):
-            raise ValueError(f"Error parsing years from {image_path}")
-        years = region[start:]
-        region = region[:start]
     years = years.split("to")
+    if len(years) == 1:
+        years = years[0].split("-")
     return region, (int(years[0]), int(years[1]))
 
 

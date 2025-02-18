@@ -118,12 +118,14 @@ def tile_raster_and_convert_to_png(source_path, *, tile_size):
             epsg_code = src.crs.to_epsg()
 
     images = []
-    tiles = create_raster_tiles(source_path, tile_size=tile_size, crs=src.crs)
 
-    for tiff, coords in tiles:
-        image = raster_to_png(tiff)
+    _, tiles = create_raster_tiles(source_path, tile_size=tile_size, crs=src.crs)
+
+    for tile, coords in tiles:
+        image = raster_to_png(tile)
         if image.max() != float("nan"):
             images.append((image, coords))
+
     return images, epsg_code
 
 
@@ -277,7 +279,7 @@ def create_raster_tiles(
                 update_pbar()
 
     if callback_queue is None:
-        pbar.update(total_updates - updates)
+        pbar.update(total_updates - updates + 1)
         pbar.close()
     else:
         callback_queue.put((source_path, total_updates - updates, total_updates))
