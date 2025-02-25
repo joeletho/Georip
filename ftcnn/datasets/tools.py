@@ -355,7 +355,7 @@ def preprocess_ndvi_difference_rasters(
     )
 
 
-def filter_geometry_caller(
+def _filter_geometry_caller(
     filepath, geometry, *, gdf, region_column, start_year_column, end_year_column
 ):
     return gdf_intersects_region_year_geometry(
@@ -525,7 +525,7 @@ def make_ndvi_difference_dataset(
             num_workers=num_workers,
             preserve_fields=preserve_fields,
             filter_geometry=partial(
-                filter_geometry_caller,
+                _filter_geometry_caller,
                 gdf=gdf,
                 region_column=region_col,
                 start_year_column=start_year_col,
