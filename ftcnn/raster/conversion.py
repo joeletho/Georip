@@ -6,7 +6,7 @@ import skimage.io as skio
 from osgeo import gdal, gdal_array
 from skimage.util import img_as_float
 
-from ftcnn.io.geospacial import open_geo_dataset
+from ftcnn.io.geoprocessing import open_geo_dataset
 
 
 def raster_to_png(

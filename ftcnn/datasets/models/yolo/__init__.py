@@ -3,8 +3,7 @@ from pathlib import Path
 from typing import Any
 
 from ftcnn.datasets.models.yolo.utils import create_ndvi_difference_dataset
-from ftcnn.geospacial import DataFrameLike
-from ftcnn.io import save_as_yaml
+from ftcnn.geoprocessing import DataFrameLike
 from ftcnn.modeling.utils import AnnotatedLabel, DatasetSplitMode, ImageData
 from ftcnn.modeling.yolo import YOLODatasetBase
 from ftcnn.utils import StrPathLike

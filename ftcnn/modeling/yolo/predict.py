@@ -12,7 +12,7 @@ from tqdm.auto import tqdm, trange
 from ultralytics.engine.results import Results
 
 from ftcnn.geometry.polygons import mask_to_polygon
-from ftcnn.geospacial.utils import parse_region_and_years_from_path
+from ftcnn.geoprocessing.utils import parse_region_and_years_from_path
 from ftcnn.modeling.yolo.utils import get_result_stats
 from ftcnn.raster.tools import tile_raster_and_convert_to_png
 from ftcnn.utils import NUM_CPU, StrPathLike

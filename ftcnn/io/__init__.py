@@ -4,10 +4,11 @@ from pathlib import Path
 
 import geopandas as gpd
 import yaml
-from ftcnn.geospacial import DataFrameLike
+
+from ftcnn.geoprocessing import DataFrameLike
 from ftcnn.utils import StrPathLike
 
-from .geospacial import load_geo_dataframe, load_shapefile, open_geo_dataset
+from .geoprocessing import load_geo_dataframe, load_shapefile, open_geo_dataset
 
 __all__ = [
     "save_as_csv",

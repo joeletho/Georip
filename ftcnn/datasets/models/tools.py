@@ -5,15 +5,19 @@ from typing import Any
 
 import geopandas as gpd
 import pandas as pd
+from tqdm.auto import trange
+
 from ftcnn.datasets.tools import make_ndvi_difference_dataset
-from ftcnn.datasets.utils import (TMP_FILE_PREFIX, encode_classes,
-                                  merge_source_and_background,
-                                  postprocess_geo_source,
-                                  preprocess_geo_source)
-from ftcnn.geospacial.utils import gdf_ndvi_validate_years_as_ints
+from ftcnn.datasets.utils import (
+    TMP_FILE_PREFIX,
+    encode_classes,
+    merge_source_and_background,
+    postprocess_geo_source,
+    preprocess_geo_source,
+)
+from ftcnn.geoprocessing.utils import gdf_ndvi_validate_years_as_ints
 from ftcnn.io import save_as_csv, save_as_gpkg, save_as_shp
 from ftcnn.utils import _WRITE_LOCK, FTCNN_TMP_DIR
-from tqdm.auto import trange
 
 
 def build_ndvi_difference_dataset(config: dict[str, Any]):

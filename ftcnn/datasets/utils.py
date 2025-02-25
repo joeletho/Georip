@@ -3,15 +3,16 @@ import time
 from pathlib import Path
 from typing import Callable
 
-import ftcnn.io as io
 import geopandas as gpd
 import pandas as pd
-from ftcnn.geometry.polygons import is_sparse_polygon
-from ftcnn.geospacial import DataFrameLike
-from ftcnn.geospacial.utils import update_region_bbox
-from ftcnn.io.geospacial import load_shapefile
-from ftcnn.utils import FTCNN_TMP_DIR, StrPathLike
 from geopandas.geoseries import shapely
+
+import ftcnn.io as io
+from ftcnn.geometry.polygons import is_sparse_polygon
+from ftcnn.geoprocessing import DataFrameLike
+from ftcnn.geoprocessing.utils import update_region_bbox
+from ftcnn.io.geoprocessing import load_shapefile
+from ftcnn.utils import FTCNN_TMP_DIR, StrPathLike
 
 TMP_FILE_PREFIX = "tmp__"
 
