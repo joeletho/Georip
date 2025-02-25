@@ -13,15 +13,13 @@ from tqdm.auto import trange
 from ftcnn.datasets.utils import (
     TMP_FILE_PREFIX,
     StrPathLike,
+    _filter_geometry_caller,
     init_dataset_filepaths,
     remove_unused_tiles,
 )
 from ftcnn.geoprocessing.mapping import map_geometries_by_year_span
 from ftcnn.geoprocessing.processing import preprocess_ndvi_shapefile
-from ftcnn.geoprocessing.utils import (
-    gdf_intersects_region_year_geometry,
-    translate_xy_coords_to_index,
-)
+from ftcnn.geoprocessing.utils import translate_xy_coords_to_index
 from ftcnn.io import (
     clear_directory,
     collect_files_with_suffix,
@@ -352,19 +350,6 @@ def preprocess_ndvi_difference_rasters(
         gdf.drop_duplicates()
         .sort_values(by=[start_year_column, end_year_column])
         .reset_index(drop=True)
-    )
-
-
-def _filter_geometry_caller(
-    filepath, geometry, *, gdf, region_column, start_year_column, end_year_column
-):
-    return gdf_intersects_region_year_geometry(
-        gdf=gdf,
-        filepath=filepath,
-        geometry=geometry,
-        region_column=region_column,
-        start_year_column=start_year_column,
-        end_year_column=end_year_column,
     )
 
 

@@ -10,7 +10,10 @@ from geopandas.geoseries import shapely
 import ftcnn.io as io
 from ftcnn.geometry.polygons import is_sparse_polygon
 from ftcnn.geoprocessing import DataFrameLike
-from ftcnn.geoprocessing.utils import update_region_bbox
+from ftcnn.geoprocessing.utils import (
+    gdf_intersects_region_year_geometry,
+    update_region_bbox,
+)
 from ftcnn.io.geoprocessing import load_shapefile
 from ftcnn.utils import FTCNN_TMP_DIR, StrPathLike
 
@@ -307,6 +310,19 @@ def postprocess_geo_source(
 ) -> None:
     if source.stem.startswith(TMP_FILE_PREFIX):
         source.unlink()
+
+
+def _filter_geometry_caller(
+    filepath, geometry, *, gdf, region_column, start_year_column, end_year_column
+):
+    return gdf_intersects_region_year_geometry(
+        gdf=gdf,
+        filepath=filepath,
+        geometry=geometry,
+        region_column=region_column,
+        start_year_column=start_year_column,
+        end_year_column=end_year_column,
+    )
 
 
 def _encode_classes(
