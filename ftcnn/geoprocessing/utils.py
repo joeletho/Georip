@@ -1,6 +1,6 @@
 import re
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from time import sleep
 from typing import Callable
@@ -12,21 +12,19 @@ from rasterio import DatasetReader, rasterio
 from shapely import MultiPolygon, Polygon
 from tqdm.auto import trange
 
-from ftcnn import io
 from ftcnn.geometry import PolygonLike
 from ftcnn.geometry.polygons import (
     create_tile_polygon,
     get_polygon_points,
     is_sparse_polygon,
 )
-from ftcnn.geospacial import DataFrameLike
-from ftcnn.geospacial.conversion import (
+from ftcnn.geoprocessing import DataFrameLike
+from ftcnn.geoprocessing.conversion import (
     translate_polygon_index_to_xy,
     translate_polygon_xy_to_index,
 )
 from ftcnn.raster import create_window
-from ftcnn.utils import NUM_CPU, StrPathLike
-from ftcnn.utils.lock import Lock
+from ftcnn.utils import StrPathLike
 
 
 def collect_filepaths(df: DataFrameLike, column_name: str) -> list[str]:

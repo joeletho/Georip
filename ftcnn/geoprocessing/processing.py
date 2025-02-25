@@ -1,13 +1,14 @@
 from typing import Union
 
 import geopandas as gpd
-from ftcnn.geometry.polygons import flatten_polygons
-from ftcnn.geospacial.mapping import map_metadata
-from ftcnn.geospacial.utils import gdf_matches_image_crs, gdf_set_crs_to_image
-from ftcnn.io import collect_files_with_suffix
-from ftcnn.io.geospacial import load_shapefile
-from ftcnn.utils import StrPathLike
 from tqdm.auto import trange
+
+from ftcnn.geometry.polygons import flatten_polygons
+from ftcnn.geoprocessing.mapping import map_metadata
+from ftcnn.geoprocessing.utils import gdf_matches_image_crs, gdf_set_crs_to_image
+from ftcnn.io import collect_files_with_suffix
+from ftcnn.io.geoprocessing import load_shapefile
+from ftcnn.utils import StrPathLike
 
 
 def preprocess_ndvi_shapefile(

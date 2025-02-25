@@ -11,7 +11,10 @@ from shapely.geometry import Polygon
 from tqdm.auto import tqdm
 
 from ftcnn.geometry.polygons import create_tile_polygon
-from ftcnn.geospacial.utils import stem_contains_region_and_years, stem_contains_years
+from ftcnn.geoprocessing.utils import (
+    stem_contains_region_and_years,
+    stem_contains_years,
+)
 from ftcnn.io import collect_files_with_suffix
 from ftcnn.raster import create_window
 from ftcnn.raster.utils import get_rows_cols_min_max_bounds
