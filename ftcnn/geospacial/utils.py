@@ -2,23 +2,31 @@ import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from time import sleep
 from typing import Callable
 
 import geopandas as gpd
-import numpy as np
 import pandas as pd
 import shapely
 from rasterio import DatasetReader, rasterio
 from shapely import MultiPolygon, Polygon
 from tqdm.auto import trange
 
+from ftcnn import io
 from ftcnn.geometry import PolygonLike
-from ftcnn.geometry.polygons import get_polygon_points, is_sparse_polygon
+from ftcnn.geometry.polygons import (
+    create_tile_polygon,
+    get_polygon_points,
+    is_sparse_polygon,
+)
 from ftcnn.geospacial import DataFrameLike
-from ftcnn.geospacial.conversion import (translate_polygon_index_to_xy,
-                                         translate_polygon_xy_to_index)
+from ftcnn.geospacial.conversion import (
+    translate_polygon_index_to_xy,
+    translate_polygon_xy_to_index,
+)
 from ftcnn.raster import create_window
-from ftcnn.utils import StrPathLike
+from ftcnn.utils import NUM_CPU, StrPathLike
+from ftcnn.utils.lock import Lock
 
 
 def collect_filepaths(df: DataFrameLike, column_name: str) -> list[str]:
@@ -522,13 +530,11 @@ def clip_geometries_to_raster_by_parts(
     return gdf
 
 
-def clip_geometries_to_raster_parallel(
+def _clip_geometries_to_raster(
     gdf: gpd.GeoDataFrame,
     raster_path: StrPathLike,
     geometry_column: str = "geometry",
-    num_workers: int = 4,
-    max_rows: int = 100,
-) -> gpd.GeoDataFrame:
+) -> gpd.GeoDataFrame | None:
     """
     Clips geometries in a GeoDataFrame to exclude areas above nodata pixels in the raster, in parallel.
 
@@ -536,50 +542,73 @@ def clip_geometries_to_raster_parallel(
         gdf (gpd.GeoDataFrame): The input GeoDataFrame with geometries to be clipped.
         raster_path (StrPathLike): Path to the raster image.
         geometry_column (str): Name of the column containing geometry.
-        num_workers (int): Number of threads to use for parallel processing.
 
     Returns:
         gpd.GeoDataFrame: A new GeoDataFrame with updated geometries clipped to non-nodata areas.
     """
-    chunk_size = len(gdf) // max_rows
-    gdf_chunks = [gdf.iloc[i : i + chunk_size] for i in range(0, len(gdf), chunk_size)]
 
     updated_gdf_list = []
 
-    pbar = trange(
-        len(gdf_chunks), desc=f"Processing {Path(raster_path).name}", leave=False
-    )
-
     data = nodata = transform = None
+
     with rasterio.open(raster_path, crs=gdf.crs) as src:
-        data, nodata, transform = get_src_data_nodata_transform(src)
+        width, height = src.width, src.height
+        # data, nodata, transform = get_src_data_nodata_transform(src)
+        (rmin, rmax), (cmin, cmax) = get_rows_cols_min_max_bounds(src)
+        width, height = src.width, src.height
+        window = create_window(cmin, rmin, width, height)
+        raster_geom = create_tile_polygon(src, window)
+        if any(gdf[geometry_column].intersects(raster_geom)):
+            return gdf
+    return None
 
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = []
-        for gdf_chunk in gdf_chunks:
-            futures.append(
-                executor.submit(
-                    clip_geometries_to_raster_by_parts,
-                    gdf_chunk,
-                    data,
-                    nodata,
-                    transform,
-                    geometry_column=geometry_column,
-                )
-            )
-
-        for future in as_completed(futures):
-            updated_gdf_list.append(future.result())
-            pbar.update()
-    pbar.close()
-    return gpd.GeoDataFrame(pd.concat(updated_gdf_list, ignore_index=True), crs=gdf.crs)
+    # if num_workers == 1:
+    #     pbar = trange(1, desc=f"Processing {Path(raster_path).name}", leave=False)
+    #     updated_gdf_list.append(
+    #         clip_geometries_to_raster_by_parts(
+    #             gdf,
+    #             data,
+    #             nodata,
+    #             transform,
+    #             geometry_column=geometry_column,
+    #         )
+    #     )
+    #     pbar.update()
+    # else:
+    #     chunk_size = max(len(gdf), len(gdf) // max_rows)
+    #     gdf_chunks = [
+    #         gdf.iloc[i : i + chunk_size] for i in range(0, len(gdf), chunk_size)
+    #     ]
+    #     pbar = trange(
+    #         len(gdf_chunks), desc=f"Processing {Path(raster_path).name}", leave=False
+    #     )
+    #     with ThreadPoolExecutor(max_workers=num_workers) as executor:
+    #         futures = []
+    #         for gdf_chunk in gdf_chunks:
+    #             futures.append(
+    #                 executor.submit(
+    #                     clip_geometries_to_raster_by_parts,
+    #                     gdf_chunk,
+    #                     data,
+    #                     nodata,
+    #                     transform,
+    #                     geometry_column=geometry_column,
+    #                 )
+    #             )
+    #
+    #         for future in as_completed(futures):
+    #             updated_gdf_list.append(future.result())
+    #         pbar.update()
+    # pbar.close()
+    # return gpd.GeoDataFrame(pd.concat(updated_gdf_list, ignore_index=True), crs=gdf.crs)
 
 
 def clip_geometries_to_rasters(
     gdf: gpd.GeoDataFrame,
     raster_paths: list[StrPathLike],
-    raster_path_column: str,
+    raster_path_key: str | Callable,
     geometry_column: str = "geometry",
+    num_workers: int = 1,
 ) -> gpd.GeoDataFrame:
     """
     Clips geometries in a GeoDataFrame for each raster image in the raster_paths list.
@@ -595,21 +624,64 @@ def clip_geometries_to_rasters(
     Returns:
         gpd.GeoDataFrame: A new GeoDataFrame with clipped geometries for each image.
     """
-    gdf = gdf.copy()
 
-    for raster_path in raster_paths:
-        raster_gdf = gdf[
-            gdf[raster_path_column].apply(lambda path: Path(path) == Path(raster_path))
-        ]
+    def process_raster(raster_path):
+        if isinstance(raster_path_key, Callable):
+            rows = []
+            for _, row in gdf.iterrows():
+                if raster_path_key(row, raster_path):
+                    rows.append(row)
+            if not len(rows):
+                return None
+            raster_gdf = gpd.GeoDataFrame(rows, crs=gdf.crs)
+        else:
+            raster_gdf = gdf[
+                gdf[raster_path_key].apply(lambda path: Path(path) == Path(raster_path))
+            ]
         if raster_gdf.empty:
-            continue
+            return None
         raster_gdf = raster_gdf.set_geometry(geometry_column)
-        clipped_gdf = clip_geometries_to_raster_parallel(
-            raster_gdf, raster_path, geometry_column
+
+        clipped = _clip_geometries_to_raster(
+            raster_gdf,
+            raster_path,
+            geometry_column,
         )
-        # Update the original gdf
-        gdf.loc[clipped_gdf.index, geometry_column] = clipped_gdf[geometry_column]
-    return gdf
+        return clipped
+
+    pbar = trange(len(raster_paths), desc="Processing rasters", leave=True)
+    clipped_gdfs = []
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = []
+        index = 0
+        while index < len(raster_paths):
+            done_futures = [future for future in futures if future.done()]
+            for future in done_futures:
+                exception = future.exception()
+                if exception:
+                    raise exception
+                clipped_gdf = future.result()
+                if clipped_gdf is not None:
+                    clipped_gdfs.append(clipped_gdf)
+                futures.remove(future)
+                pbar.update()
+
+            if len(futures) < num_workers:
+                for _ in range(num_workers - len(futures)):
+                    if index >= len(raster_paths):
+                        break
+                    futures.append(executor.submit(process_raster, raster_paths[index]))
+                    index += 1
+
+            while True:
+                if any([future for future in futures if future.done()]):
+                    break
+                pbar.refresh()
+                sleep(1)
+    pbar.update()
+    pbar.close()
+
+    return gpd.GeoDataFrame(pd.concat(clipped_gdfs, ignore_index=True), crs=gdf.crs)
 
 
 def update_region_bbox(
