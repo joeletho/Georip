@@ -15,7 +15,7 @@ from gdipt.geoprocessing.utils import (
     update_region_bbox,
 )
 from gdipt.io.geoprocessing import load_shapefile
-from gdipt.utils import gdipt_TMP_DIR, StrPathLike
+from gdipt.utils import GDIPT_TMP_DIR, StrPathLike
 
 TMP_FILE_PREFIX = "tmp__"
 
@@ -185,7 +185,7 @@ def preprocess_geo_source(
         timestamp = f"{time.time()}"
         timestamp = timestamp[: timestamp.find(".")]
         source_path = (
-            gdipt_TMP_DIR / f"{TMP_FILE_PREFIX}preprocess_geo_source_{timestamp}.shp"
+            GDIPT_TMP_DIR / f"{TMP_FILE_PREFIX}preprocess_geo_source_{timestamp}.shp"
         )
         io.save_as_shp(source, source_path)
         return preprocess_geo_source(source_path, geometry_column)
