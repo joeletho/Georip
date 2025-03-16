@@ -1,6 +1,6 @@
 # Georip: Geospacial Raster Image Processing
 
-Georip is a repository designed for processing geospatial and raster data, specifically for forest treatment (FT) purposes, to be used in convolutional neural networks (CNNs). This project focuses on raster manipulation, allowing users to create datasets from geospatial data (such as satellite images or aerial imagery) that can be used for CNN-based image classification and segmentation. The repository provides Jupyter notebooks for dataset creation, model prediction, and visualization of results, with an emphasis on forest management and environmental monitoring applications.
+Georip is a repository designed for processing geospatial and raster data to be used in convolutional neural networks (CNNs). This project focuses on raster manipulation, allowing users to create datasets from geospatial data (such as satellite images or aerial imagery) that can be used for CNN-based image classification and segmentation. The repository provides Jupyter notebooks for dataset creation, model prediction, and visualization of results, with an emphasis on forest management and environmental monitoring applications.
 
 ## Table of Contents
 
@@ -16,7 +16,7 @@ Georip is a repository designed for processing geospatial and raster data, speci
 
 ## Description
 
-Georip is specifically designed for processing geospatial raster data (such as satellite images, lidar data, and aerial imagery) related to forest treatment activities. The primary goal of this project is to apply deep learning models, particularly convolutional neural networks (CNNs), to classify and analyze raster data for forest management and environmental monitoring. The project enables users to manipulate and preprocess raster data into training datasets for CNN models, helping to automate the classification of forest conditions, land use changes, and other relevant environmental phenomena.
+Georip is specifically designed for processing geospatial raster data (such as satellite images, lidar data, and aerial imagery). The primary goal of this project is to apply deep learning models, particularly convolutional neural networks (CNNs), to classify and analyze raster data for forest management and environmental monitoring. The project enables users to manipulate and preprocess raster data into training datasets for CNN models, helping to automate the classification of forest conditions, land use changes, and other relevant environmental phenomena.
 
 Key features include:
 
