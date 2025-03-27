@@ -50,7 +50,7 @@ This will create a Conda environment with all the required dependencies for runn
 
 To activate the environment, run:
   ```bash
-  conda activate ftcnn
+  conda activate georip
   ```
 
 Once activated, you can start using the provided Jupyter notebooks for dataset creation, model training, prediction, and result visualization.
