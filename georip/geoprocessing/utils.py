@@ -24,6 +24,7 @@ from georip.geoprocessing.conversion import (
     translate_polygon_xy_to_index,
 )
 from georip.raster import create_window
+from georip.raster.utils import get_rows_cols_min_max_bounds
 from georip.utils import StrPathLike
 
 
