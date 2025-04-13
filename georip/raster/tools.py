@@ -157,20 +157,42 @@ def create_raster_tiles(
     callback_queue: Queue | None = None,
 ) -> tuple[Path, list[np.ndarray]]:
     """
-    Creates raster tiles from a source raster and saves them to disk (or returns them as arrays).
+    Splits a source raster into smaller tiles, optionally filters or saves them, 
+    and returns the output paths and coordinates.
 
     Parameters:
-        source_path (StrPathLike): The file path to the source raster.
-        tile_size (tuple[int, int]): The size of the tiles (width, height).
-        crs (str | None, optional): The coordinate reference system to use. Defaults to None.
-        output_dir (StrPathLike | None, optional): Directory where the tiles should be saved. Defaults to None.
-        exist_ok (bool, optional): If False, raises an error if tile files already exist. Defaults to False.
-        leave (bool, optional): If True, leaves the progress bar description when finished. Defaults to False.
-        filter_geometry (Callable | None): A filter function to exclude tiles based on geometry.
-        window (rasterio.windows.Window | None): Optional window to process a subset of the raster. Defaults to None.
+        source_path (StrPathLike): Path to the input raster file.
+        tile_size (tuple[int, int]): Tile dimensions as (width, height) in pixels.
+        crs (str | None, optional): Target coordinate reference system. If provided, 
+            it overrides the CRS of the input raster. Defaults to None.
+        output_dir (StrPathLike | None, optional): If specified, tiles are saved 
+            to this directory as individual GeoTIFF files. If None, tiles are kept in memory.
+        exist_ok (bool, optional): If False and a tile file already exists, raises a 
+            FileExistsError. If True, allows overwriting or skipping. Defaults to False.
+        leave (bool, optional): Whether to leave the progress bar displayed after completion. 
+            Only applies if `callback_queue` is not used. Defaults to False.
+        filter_geometry (Callable | None, optional): A user-defined function that takes 
+            (source_path, tile_bounds) and returns True to keep the tile or False to discard it.
+        window (rasterio.windows.Window | None, optional): Optional raster window for 
+            subsetting the raster before tiling. If None, processes the full raster extent.
+        stride (int | tuple[int, int] | None, optional): Step size in pixels between tiles. 
+            If None, stride equals tile size (non-overlapping). If int, applies to both 
+            directions. If tuple, applies separately as (x_stride, y_stride).
+        callback_queue (Queue | None, optional): Optional queue to support asynchronous 
+            updates for progress tracking in multiprocessing environments.
 
     Returns:
-        list[np.ndarray]: A list of tile arrays (with corresponding metadata) or an empty list if no tiles are created.
+        tuple[Path, list[np.ndarray]]: A tuple containing:
+            - The original source path as a Path object.
+            - A list of tuples with:
+                - The output path to the written tile (or None if not saved),
+                - The (x, y) coordinate of the tile's top-left corner.
+              Returns an empty list if no valid tiles are created.
+
+    Raises:
+        ValueError: If tile dimensions or stride values are invalid.
+        FileExistsError: If a tile already exists and `exist_ok` is False.
+        ArgumentError: If `stride` is not None, int, or a valid tuple.
     """
     source_path = Path(source_path)
     width, height = tile_size
