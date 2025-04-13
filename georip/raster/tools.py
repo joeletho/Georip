@@ -19,7 +19,13 @@ from .conversion import raster_to_png
 
 
 def process_raster_to_png_conversion(
-    source_dir, dest_dir, *, recurse=True, preserve_dir=True, clear_dir=True, leave=True
+    source_dir: StrPathLike,
+    dest_dir: StrPathLike,
+    *,
+    recurse: bool = True,
+    preserve_dir: bool = True,
+    clear_dir: bool = True,
+    leave: bool = True,
 ):
     """
     Converts all TIFF files in the source directory (and subdirectories if specified) into PNG format
@@ -88,7 +94,12 @@ def process_raster_to_png_conversion(
     return file_map
 
 
-def tile_raster_and_convert_to_png(source_path, *, tile_size):
+def tile_raster_and_convert_to_png(
+    source_path: StrPathLike,
+    *,
+    tile_size: tuple[int, int],
+    stride: tuple[int, int] | None = None,
+):
     """
     Tiles a GeoTIFF file into smaller sections and converts each section into PNG images.
 
@@ -101,6 +112,7 @@ def tile_raster_and_convert_to_png(source_path, *, tile_size):
     Parameters:
         source_path (StrPathLike): Path to the GeoTIFF file to be tiled and converted.
         tile_size (tuple[int, int]): Size of the tiles (in pixels) to create from the GeoTIFF.
+        stride (tuple[int, int] | None): Size of the tile stride (in pixels) to create from the GeoTIFF.
 
     Returns:
         tuple: A tuple containing:
@@ -111,6 +123,7 @@ def tile_raster_and_convert_to_png(source_path, *, tile_size):
         AttributeError: If the GeoTIFF file does not contain an EPSG code (CRS identifier).
         Any exception raised by file reading or conversion process.
     """
+    NAN = float("nan")
     epsg_code = None
     with rasterio.open(source_path) as src:
         if src.crs.is_epsg_code:
@@ -119,11 +132,13 @@ def tile_raster_and_convert_to_png(source_path, *, tile_size):
 
     images = []
 
-    _, tiles = create_raster_tiles(source_path, tile_size=tile_size, crs=src.crs)
+    _, tiles = create_raster_tiles(
+        source_path, tile_size=tile_size, crs=src.crs, stride=stride
+    )
 
     for tile, coords in tiles:
         image = raster_to_png(tile)
-        if image.max() != float("nan"):
+        if image.max() != NAN:
             images.append((image, coords))
 
     return images, epsg_code
